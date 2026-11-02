@@ -69,7 +69,11 @@
       "icon": "build/icon.png",
       "identity": "-",
       "extendInfo": {
-        "LSUIElement": true
+        "LSUIElement": true,
+        "NSLocalNetworkUsageDescription": "Network Signage uses your local network so TVs and phones can find and reach it.",
+        "NSBonjourServices": [
+          "_network-signage._tcp"
+        ]
       },
       "extraResources": [
         {
