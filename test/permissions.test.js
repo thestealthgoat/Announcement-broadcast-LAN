@@ -51,6 +51,17 @@ const ROUTES = [
   ['PATCH /api/media/:id', ['library.edit', 'library.own'], async ({ admin }) => ({ id: await newMedia(admin), body: { name: 'Changed' } }), { sufficient: ['library.edit'] }],
   ['DELETE /api/media/:id', ['library.edit', 'library.own', 'live.manage'], async ({ admin }) => ({ id: await newMedia(admin) }), { sufficient: ['library.edit'] }],
 
+  ['POST /api/library/bulk/move', ['library.edit', 'library.own'], async ({ admin }) => ({ body: { ids: [await newMedia(admin)], folderId: null } }), { sufficient: ['library.edit'] }],
+  ['POST /api/library/bulk/tag', ['library.edit', 'library.own'], async ({ admin }) => ({ body: { ids: [await newMedia(admin)], add: [await newTag(admin)] } }), { sufficient: ['library.edit'] }],
+  ['POST /api/library/bulk/add-to-channel', ['channels.add'], async ({ admin }) => ({ body: { ids: [await newMedia(admin)], channelId: await newChannel(admin) } })],
+  ['POST /api/library/bulk/delete', ['library.edit', 'library.own', 'live.manage'], async ({ admin }) => ({ body: { ids: [await newMedia(admin)] } }), { sufficient: ['library.edit'] }],
+  ['POST /api/folders', ['library.edit'], async () => ({ body: { name: unique('Folder ') } })],
+  ['PATCH /api/folders/:id', ['library.edit'], async ({ admin }) => ({ id: await newFolder(admin), body: { name: unique('Renamed ') } })],
+  ['DELETE /api/folders/:id', ['library.edit'], async ({ admin }) => ({ id: await newFolder(admin) })],
+  ['POST /api/tags', ['library.edit'], async () => ({ body: { name: unique('Tag ') } })],
+  ['PATCH /api/tags/:id', ['library.edit'], async ({ admin }) => ({ id: await newTag(admin), body: { name: unique('Renamed ') } })],
+  ['DELETE /api/tags/:id', ['library.edit'], async ({ admin }) => ({ id: await newTag(admin) })],
+
   ['POST /api/pair', ['screens.manage'], async ({ admin }) => ({ body: { code: '0000', channelId: await newChannel(admin) } }), { expect: 404 }],
   ['PATCH /api/screens/:id', ['screens.manage'], async ({ server }) => ({ id: newScreen(server), body: { name: 'Hall' } })],
   ['DELETE /api/screens/:id', ['screens.manage'], async ({ server }) => ({ id: newScreen(server) })],
@@ -85,6 +96,12 @@ async function newChannel(admin) {
 }
 async function newMedia(admin) {
   return (await admin.post('/api/media/text', { title: 'Item' })).data.id;
+}
+async function newFolder(admin) {
+  return (await admin.post('/api/folders', { name: unique('Spare ') })).data.id;
+}
+async function newTag(admin) {
+  return (await admin.post('/api/tags', { name: unique('Spare ') })).data.id;
 }
 async function newPlacement(admin) {
   const channelId = await newChannel(admin);

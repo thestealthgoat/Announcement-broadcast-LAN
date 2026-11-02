@@ -1,9 +1,10 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
+import { Transform } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { requireUser, requirePermission, httpError, canAddToChannel, canEditMedia, mediaInScope } from '../auth.js';
-import { hasPermission } from '../permissions.js';
+import { deleteBlock, findDuplicate, removeMedia } from '../library.js';
 import { sniffImage } from '../media.js';
 import { addToChannel } from './channels.js';
 import { text } from './auth.js';
@@ -18,6 +19,7 @@ export function mediaJson(m) {
     duration: m.duration, pages: m.pages, url: m.url, title: m.title, body: m.body, size: m.size,
     createdAt: m.created_at,
     createdBy: m.created_by,
+    folderId: m.folder_id ?? null,
     live: isLiveFeedUrl(m.url),
   };
 }
@@ -45,10 +47,10 @@ export default async function mediaRoutes(app, { db, hub, processor, live, media
   const insert = (fields) => {
     const id = fields.id ?? randomUUID();
     db.run(
-      `INSERT INTO media (id, type, name, status, file, pages, url, title, body, size, created_by, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO media (id, type, name, status, file, pages, url, title, body, size, sha256, created_by, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       id, fields.type, fields.name, fields.status ?? 'ready', fields.file ?? null, fields.pages ?? null,
-      fields.url ?? null, fields.title ?? null, fields.body ?? null, fields.size ?? null, fields.userId, Date.now(),
+      fields.url ?? null, fields.title ?? null, fields.body ?? null, fields.size ?? null, fields.sha256 ?? null, fields.userId, Date.now(),
     );
     return id;
   };
@@ -82,7 +84,8 @@ export default async function mediaRoutes(app, { db, hub, processor, live, media
     db.all('SELECT * FROM media ORDER BY created_at DESC, rowid DESC').map((m) => ({ ...mediaJson(m), liveStatus: live.statusOf(m.id) })),
   );
 
-  // Image or video upload, streamed straight to disk.
+  // Image or video upload, streamed straight to disk. The hash is taken on the way through, so a
+  // large file is never read twice and a video's hash is of its source, which conversion deletes.
   app.post('/api/media', { preHandler: requireUpload }, async (req) => {
     const channelId = targetChannel(req);
     const part = await req.file();
@@ -92,7 +95,14 @@ export default async function mediaRoutes(app, { db, hub, processor, live, media
     fs.mkdirSync(dir, { recursive: true });
     const tmp = path.join(dir, 'upload.tmp');
     try {
-      await pipeline(part.file, fs.createWriteStream(tmp));
+      const hash = createHash('sha256');
+      const hasher = new Transform({
+        transform(chunk, _encoding, done) {
+          hash.update(chunk);
+          done(null, chunk);
+        },
+      });
+      await pipeline(part.file, hasher, fs.createWriteStream(tmp));
       if (part.file.truncated) throw httpError(413, 'That file is too large.');
       const head = Buffer.alloc(16);
       const fd = fs.openSync(tmp, 'r');
@@ -114,9 +124,11 @@ export default async function mediaRoutes(app, { db, hub, processor, live, media
         throw httpError(415, 'Use JPG, PNG, WebP or GIF images, or a video file. PDFs upload from the admin page.');
       }
       fs.renameSync(tmp, path.join(dir, file));
-      insert({ id, type, name, status: 'processing', file, size: fs.statSync(path.join(dir, file)).size, userId: req.user.id });
+      const sha256 = hash.digest('hex');
+      insert({ id, type, name, status: 'processing', file, size: fs.statSync(path.join(dir, file)).size, sha256, userId: req.user.id });
       processor.enqueue(id);
-      return finish(id, channelId);
+      // A match never stops the upload. The new item stays, and the admin page offers to discard it.
+      return { ...finish(id, channelId), duplicateOf: findDuplicate(db, sha256, id) };
     } catch (err) {
       fs.rmSync(dir, { recursive: true, force: true });
       throw err;
@@ -205,19 +217,16 @@ export default async function mediaRoutes(app, { db, hub, processor, live, media
     return mediaJson(getMedia(m.id));
   });
 
-  // A live feed belongs to whoever manages live feeds, so library permissions alone can't delete one.
+  // The same checks as deleting from the library's bulk actions, in deleteBlock.
   app.delete('/api/media/:id', { preHandler: requirePermission('library.edit', 'library.own', 'live.manage') }, async (req) => {
     const m = getMedia(req.params.id);
-    if (!live.isFeed(m.id)) assertCanEdit(req, m.id);
-    else if (!hasPermission(req.user, 'live.manage')) throw httpError(403, 'You do not have permission to delete a live feed.');
-    else if (!mediaInScope(db, req.user, m.id)) throw httpError(403, 'This item is also used on channels you do not manage.');
-    const channels = db.all('SELECT DISTINCT channel_id FROM playlist_items WHERE media_id = ?', m.id);
-    const wasOverride = db.get('SELECT 1 AS x FROM overrides WHERE media_id = ? AND cleared_at IS NULL', m.id);
-    await live.remove(m.id);
-    db.run('DELETE FROM media WHERE id = ?', m.id);
-    fs.rmSync(path.join(mediaDir, m.id), { recursive: true, force: true });
+    const block = deleteBlock(db, live, req.user, m);
+    if (block === 'feed') throw httpError(403, 'You do not have permission to delete a live feed.');
+    if (block === 'scope') throw httpError(403, 'This item is also used on channels you do not manage.');
+    if (block) throw httpError(403, 'You can only change items you uploaded.');
+    const { channels, wasOverride } = await removeMedia({ db, live, mediaDir }, m);
     if (wasOverride) hub.pushAll();
-    else for (const c of channels) hub.pushChannel(c.channel_id);
+    else for (const c of channels) hub.pushChannel(c);
     hub.adminRefresh('media');
     hub.adminRefresh('channels');
     hub.adminRefresh('overrides');

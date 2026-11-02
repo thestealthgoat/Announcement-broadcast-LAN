@@ -1,0 +1,176 @@
+import fs from 'node:fs';
+import path from 'node:path';
+import { createHash } from 'node:crypto';
+import { canEditMedia, mediaInScope } from './auth.js';
+import { hasPermission } from './permissions.js';
+
+const ids = (mediaIds) => JSON.stringify(mediaIds);
+
+// What is using each library item right now. This is the one place that decides whether an item is
+// in use: the library, delete warnings, and the cleanup view all read `inUse` from here. Anything new
+// that refers to a library item, like a background image in the announcement designer, adds its
+// references here and to `inUse`, and every one of those screens follows.
+export function mediaUsage(db, mediaIds, now = Date.now()) {
+  const usage = new Map(mediaIds.map((id) => [id, { channels: [], overrides: [], inUse: false }]));
+  if (!mediaIds.length) return usage;
+  const list = ids(mediaIds);
+
+  for (const r of db.all(
+    `SELECT DISTINCT p.media_id, c.id, c.name FROM playlist_items p JOIN channels c ON c.id = p.channel_id
+     WHERE p.media_id IN (SELECT value FROM json_each(?)) ORDER BY c.name COLLATE NOCASE`,
+    list,
+  )) usage.get(r.media_id).channels.push({ id: r.id, name: r.name });
+
+  for (const o of db.all(
+    `SELECT id, media_id, all_channels FROM overrides
+     WHERE media_id IN (SELECT value FROM json_each(?)) AND cleared_at IS NULL AND (ends_at IS NULL OR ends_at > ?)`,
+    list, now,
+  )) {
+    const channels = db.all(
+      `SELECT c.id, c.name FROM override_channels oc JOIN channels c ON c.id = oc.channel_id
+       WHERE oc.override_id = ? ORDER BY c.name COLLATE NOCASE`,
+      o.id,
+    );
+    usage.get(o.media_id).overrides.push({ id: o.id, allChannels: !!o.all_channels, channels });
+  }
+
+  for (const u of usage.values()) u.inUse = u.channels.length > 0 || u.overrides.length > 0;
+  return usage;
+}
+
+export const isMediaUsed = (db, mediaId) => mediaUsage(db, [mediaId]).get(mediaId).inUse;
+
+export const isLiveFeed = (live, m) => live.isFeed(m.id) || (typeof m.url === 'string' && m.url.startsWith('/live/'));
+
+// Why this person can't change an item: 'scope', 'own', 'rights', or null when they can.
+export function editBlock(db, user, mediaId) {
+  if (canEditMedia(db, user, mediaId)) return null;
+  if (!mediaInScope(db, user, mediaId)) return 'scope';
+  return hasPermission(user, 'library.own') ? 'own' : 'rights';
+}
+
+// Why this person can't delete an item: 'feed', or any answer from editBlock.
+// A live feed belongs to whoever manages live feeds, so library permissions alone can't delete one.
+export function deleteBlock(db, live, user, m) {
+  if (!live.isFeed(m.id)) return editBlock(db, user, m.id);
+  if (!hasPermission(user, 'live.manage')) return 'feed';
+  return mediaInScope(db, user, m.id) ? null : 'scope';
+}
+
+// Deletes one item and its files. The caller tells the TVs and admin screens afterwards.
+export async function removeMedia({ db, live, mediaDir }, m) {
+  const channels = db.all('SELECT DISTINCT channel_id FROM playlist_items WHERE media_id = ?', m.id).map((c) => c.channel_id);
+  const wasOverride = !!db.get('SELECT 1 AS x FROM overrides WHERE media_id = ? AND cleared_at IS NULL', m.id);
+  await live.remove(m.id);
+  db.run('DELETE FROM media WHERE id = ?', m.id);
+  await fs.promises.rm(path.join(mediaDir, m.id), { recursive: true, force: true });
+  return { channels, wasOverride };
+}
+
+// Another item holding the same file. An item that failed to process doesn't count, so a retry doesn't warn.
+export function findDuplicate(db, sha256, exceptId) {
+  const row = db.get(
+    `SELECT id, name FROM media WHERE sha256 = ? AND id != ? AND status != 'failed'
+     ORDER BY created_at, rowid LIMIT 1`,
+    sha256, exceptId,
+  );
+  return row ? { id: row.id, name: row.name } : null;
+}
+
+// The space deleting an item would free, which includes its thumbnail.
+export async function folderSize(dir) {
+  let total = 0;
+  let names;
+  try {
+    names = await fs.promises.readdir(dir);
+  } catch {
+    return 0;
+  }
+  for (const name of names) {
+    try {
+      total += (await fs.promises.stat(path.join(dir, name))).size;
+    } catch {}
+  }
+  return total;
+}
+
+// Hashes library items from before duplicate checking, one file at a time and slowly, so TVs keep
+// being served. It waits whenever a video is converting. A converted video's source is gone, so an
+// older video's hash is of the converted file.
+export function createHashBackfill({ db, mediaDir, isBusy = () => false, log, startDelayMs = 60000, chunkPauseMs = 4, filePauseMs = 50, busyPollMs = 1000 }) {
+  let stopped = false;
+  let timer = null;
+  let wake = null;
+  let stream = null;
+  let running = null;
+
+  const sleep = (ms) => new Promise((resolve) => {
+    wake = resolve;
+    timer = setTimeout(resolve, ms);
+    timer.unref?.();
+  });
+
+  async function hashFile(file) {
+    const hash = createHash('sha256');
+    stream = fs.createReadStream(file, { highWaterMark: 256 * 1024 });
+    try {
+      for await (const chunk of stream) {
+        hash.update(chunk);
+        if (stopped) return null;
+        await sleep(chunkPauseMs);
+        while (isBusy() && !stopped) await sleep(busyPollMs);
+      }
+    } finally {
+      stream.destroy();
+      stream = null;
+    }
+    return stopped ? null : hash.digest('hex');
+  }
+
+  async function pass() {
+    let hashed = 0;
+    const rows = db.all(
+      `SELECT id, file FROM media
+       WHERE sha256 IS NULL AND status = 'ready' AND file IS NOT NULL AND type IN ('image', 'video')
+       ORDER BY created_at DESC, rowid DESC`,
+    );
+    for (const m of rows) {
+      while (isBusy() && !stopped) await sleep(busyPollMs);
+      if (stopped) break;
+      try {
+        const sha256 = await hashFile(path.join(mediaDir, m.id, m.file));
+        if (!sha256) break;
+        // The item may have been deleted while this ran.
+        db.run('UPDATE media SET sha256 = ? WHERE id = ? AND sha256 IS NULL AND file = ?', sha256, m.id, m.file);
+        hashed += 1;
+      } catch (err) {
+        // Stays empty, so the next start tries it again.
+        if (err.code !== 'ENOENT') log?.warn?.({ err, id: m.id }, 'could not hash a library item');
+      }
+      await sleep(filePauseMs);
+    }
+    return hashed;
+  }
+
+  return {
+    // One full pass. Resolves with how many items were hashed.
+    run() {
+      running ??= pass().finally(() => { running = null; });
+      return running;
+    },
+    // Not awaited by anything: a slow disk must never hold up serving.
+    start() {
+      timer = setTimeout(() => {
+        this.run().catch((err) => log?.error?.(err));
+      }, startDelayMs);
+      timer.unref?.();
+    },
+    async stop() {
+      stopped = true;
+      clearTimeout(timer);
+      wake?.();
+      stream?.destroy();
+      await running?.catch(() => {});
+    },
+  };
+}

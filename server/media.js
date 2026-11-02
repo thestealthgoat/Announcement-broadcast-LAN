@@ -157,6 +157,7 @@ export function createProcessor({ db, hub, mediaDir, ffmpeg = resolveFfmpeg(), l
   }
 
   return {
+    busy: () => running || queue.length > 0,
     enqueue(id) {
       queue.push(id);
       drain().catch((err) => log.error(err));

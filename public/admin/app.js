@@ -3,6 +3,7 @@ import { setupView, loginView } from './views/auth.js';
 import { screensView } from './views/screens.js';
 import { channelsView, channelView } from './views/channels.js';
 import { libraryView } from './views/library.js';
+import { cleanupView } from './views/cleanup.js';
 import { uploadView } from './views/uploadPage.js';
 import { overrideView } from './views/override.js';
 import { usersView } from './views/users.js';
@@ -53,7 +54,9 @@ function route() {
     case 'channels':
       if (!usesChannels()) return screensView;
       return parts[1] ? (c, x) => channelView(c, x, Number(parts[1])) : channelsView;
-    case 'library': return libraryView;
+    case 'library':
+      if (parts[1] !== 'cleanup') return libraryView;
+      return ctx.can('library.edit') || ctx.can('library.own') ? cleanupView : libraryView;
     case 'upload': return ctx.can('library.upload') ? uploadView : screensView;
     case 'override': return ctx.can('overrides.push') ? overrideView : screensView;
     case 'users': return ctx.can('users.manage') ? usersView : screensView;

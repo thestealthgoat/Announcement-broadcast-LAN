@@ -154,3 +154,33 @@ dialog::backdrop { background: rgba(0,0,0,.5); }
 .perm-list { margin: .25rem 0 .75rem; padding-left: 1.2rem; }
 .perm-list li { margin-bottom: 2px; }
 .perm-group { font-weight: 600; margin-top: 10px; }
+
+/* Library */
+.lib-more { margin-bottom: 8px; }
+.lib-more summary { min-height: 44px; display: flex; align-items: center; gap: 6px; font-weight: 600; cursor: pointer; }
+.lib-more summary::before { content: '›'; font-size: 1.2rem; line-height: 1; }
+.lib-more[open] summary::before { transform: rotate(90deg); }
+.lib-filters { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 8px; }
+.lib-filters select { width: 100%; min-width: 0; }
+.lib-count { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 8px; }
+.media-card { position: relative; }
+.media-card.selected { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent); }
+.sel-mark { position: absolute; top: 6px; left: 6px; z-index: 1; width: 26px; height: 26px; border-radius: 50%; border: 2px solid #fff; background: rgba(0,0,0,.45); color: #fff; display: flex; align-items: center; justify-content: center; font-size: .9rem; }
+.sel-mark.on { background: var(--accent); }
+.lib-usage { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.lib-tags { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; }
+.lib-tag { padding: 0 6px; border: 1px solid var(--border); border-radius: 8px; font-size: .75rem; color: var(--muted); max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.lib-tag-boxes { display: flex; flex-wrap: wrap; gap: 0 14px; }
+.lib-names { margin: 0 0 .75rem; padding-left: 1.2rem; font-size: .9rem; overflow-wrap: anywhere; }
+.lib-sub { font-size: .95rem; margin: 0 0 4px; }
+.lib-row { cursor: pointer; }
+.lib-row input[type=checkbox] { width: 20px; height: 20px; flex: none; accent-color: var(--accent); }
+.lib-dup { margin-top: 6px; display: flex; flex-direction: column; align-items: flex-start; gap: 6px; }
+.sel-bar { position: sticky; z-index: 10; bottom: calc(68px + env(safe-area-inset-bottom)); margin-top: 12px; padding: 8px; display: flex; flex-wrap: wrap; align-items: center; gap: 6px; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); box-shadow: 0 6px 20px rgba(0,0,0,.2); }
+.sel-bar .grow { flex: 1 1 40%; min-width: 0; }
+.sel-bar button { flex: 1 1 auto; padding: 8px 6px; font-size: .9rem; white-space: nowrap; }
+@media (min-width: 800px) {
+  .sel-bar { bottom: 12px; }
+  .sel-bar .grow { flex: 1 1 120px; }
+  .sel-bar button { flex: 0 0 auto; }
+}

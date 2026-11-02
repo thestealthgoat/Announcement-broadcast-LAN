@@ -10,6 +10,7 @@ import { openDb } from './db.js';
 import { createHub } from './hub.js';
 import { createProcessor, resolveFfmpeg } from './media.js';
 import { createLiveFeeds } from './live/supervisor.js';
+import { createHashBackfill } from './library.js';
 import { isLocalAddress, baseUrls } from './lan.js';
 import { userFromToken, httpError, createLoginLimiter, COOKIE } from './auth.js';
 import { listAdmins, resetAdminPassword } from './recovery.js';
@@ -19,6 +20,7 @@ import userRoutes from './routes/users.js';
 import roleRoutes from './routes/roles.js';
 import channelRoutes from './routes/channels.js';
 import mediaRoutes from './routes/media.js';
+import libraryRoutes from './routes/library.js';
 import screenRoutes from './routes/screens.js';
 import overrideRoutes from './routes/overrides.js';
 import settingsRoutes from './routes/settings.js';
@@ -50,7 +52,7 @@ const ADMIN_CSP = [
   "form-action 'self'",
 ].join('; ');
 
-export async function createServer({ dataDir, port = 8080, host = '0.0.0.0', ffmpeg = resolveFfmpeg(), logger = false, ops: opsDeps = {} }) {
+export async function createServer({ dataDir, port = 8080, host = '0.0.0.0', ffmpeg = resolveFfmpeg(), logger = false, ops: opsDeps = {}, hashBackfillDelayMs }) {
   const mediaDir = path.join(dataDir, 'media');
   fs.mkdirSync(mediaDir, { recursive: true });
 
@@ -64,6 +66,7 @@ export async function createServer({ dataDir, port = 8080, host = '0.0.0.0', ffm
   const hub = createHub(db, app.log, (mediaId) => live.isAvailable(mediaId));
   const processor = createProcessor({ db, hub, mediaDir, ffmpeg, log: app.log });
   const live = createLiveFeeds({ db, hub, dataDir, ffmpeg, log: app.log });
+  const hashBackfill = createHashBackfill({ db, mediaDir, isBusy: processor.busy, log: app.log, startDelayMs: hashBackfillDelayMs });
 
   app.decorateRequest('user', null);
   await app.register(cookie);
@@ -106,6 +109,7 @@ export async function createServer({ dataDir, port = 8080, host = '0.0.0.0', ffm
   await app.register(roleRoutes, ctx);
   await app.register(channelRoutes, ctx);
   await app.register(mediaRoutes, ctx);
+  await app.register(libraryRoutes, ctx);
   await app.register(screenRoutes, ctx);
   await app.register(overrideRoutes, ctx);
   await app.register(settingsRoutes, ctx);
@@ -167,6 +171,7 @@ export async function createServer({ dataDir, port = 8080, host = '0.0.0.0', ffm
   });
 
   app.addHook('onClose', async () => {
+    await hashBackfill.stop();
     await ops.stop();
     await live.stop();
     processor.stop();
@@ -174,7 +179,7 @@ export async function createServer({ dataDir, port = 8080, host = '0.0.0.0', ffm
   });
 
   return {
-    app, db, hub, processor, ops, live, routes,
+    app, db, hub, processor, ops, live, routes, hashBackfill,
     listAdmins: () => listAdmins(db),
     async resetAdminPassword(userId) {
       const temp = await resetAdminPassword(db, userId);
@@ -185,6 +190,7 @@ export async function createServer({ dataDir, port = 8080, host = '0.0.0.0', ffm
       await app.listen({ port, host });
       processor.resume();
       live.start();
+      hashBackfill.start();
       hub.scheduleOverrideExpiry();
       ops.start(); // Not awaited: a slow check must never hold up serving.
       return { port: portRef(), urls: baseUrls(portRef()) };

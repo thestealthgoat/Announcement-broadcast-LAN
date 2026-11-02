@@ -1,7 +1,7 @@
-import { h, api, guard, field } from '../lib.js';
+import { h, api, guard, field, toast } from '../lib.js';
 import { uploadFile } from '../upload.js';
 
-export async function uploadView(main) {
+export async function uploadView(main, ctx) {
   const channels = (await guard(() => api.get('/api/channels'))) ?? [];
   const preselect = Number(new URLSearchParams(location.hash.split('?')[1] ?? '').get('channel')) || null;
   const channel = h('select', {},
@@ -10,6 +10,21 @@ export async function uploadView(main) {
   );
   const queueEl = h('div', { class: 'list', style: 'margin-top:12px' });
   let queue = Promise.resolve();
+
+  // A match never stops an upload. Whether two copies were wanted is for the person to decide.
+  function duplicateNotice(item, row) {
+    return h('div', { class: 'small lib-dup', role: 'status' },
+      h('div', { class: 'warn-text' }, 'This looks like a file already in the library: ', h('a', { href: `#/library?item=${item.duplicateOf.id}` }, item.duplicateOf.name), '.'),
+      (ctx.can('library.edit') || ctx.can('library.own')) && h('button', {
+        type: 'button',
+        onclick: () => guard(async () => {
+          await api.del(`/api/media/${item.id}`);
+          row.remove();
+          toast('Removed the new copy.');
+        }),
+      }, 'Discard this copy'),
+    );
+  }
 
   function addFiles(files) {
     for (const file of files) {
@@ -28,6 +43,7 @@ export async function uploadView(main) {
           });
           bar.style.width = '100%';
           status.textContent = item.status === 'processing' ? 'Uploaded. The server is finishing it, so you can leave this page.' : 'Done.';
+          if (item.duplicateOf) status.after(duplicateNotice(item, row));
         } catch (err) {
           status.textContent = err.message;
           status.className = 'err small';
