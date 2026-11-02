@@ -1,6 +1,6 @@
 # Test status
 
-What has been tested on real setups, and what hasn't. Last updated November 2, 2026, for version 1.0.2.
+What has been tested on real setups, and what hasn't. Last updated November 2, 2026. Hardware results below are from version 1.0.2 unless they say otherwise. Version 2 has automated tests only, so far.
 
 ## Passed
 
@@ -9,6 +9,7 @@ What has been tested on real setups, and what hasn't. Last updated November 2, 2
 | Playback in a browser | Computer connected to a TV by HDMI | Works |
 | Pairing, full playlist rotation | Fire TV Stick 4K Max (2nd gen), Fire OS, Silk Browser | Works |
 | Pushing and clearing an override | Same Fire TV Stick | Works |
+| Running overnight | Version 1.0.2: Fire TV Stick in Silk on a Roku TV, and a computer with a fullscreen browser, on separate channels | Both still playing the next day |
 | Branding | Admin and TV | Works |
 | Installing the `.pkg` and converting a video | Apple Silicon Mac, installed to the user folder | Works |
 | Playback while the server is stopped, then reconnecting | Desktop browser over a LAN address | Keeps playing, reconnects with no reload |
@@ -21,7 +22,7 @@ What has been tested on real setups, and what hasn't. Last updated November 2, 2
 
 | Area | Status |
 | --- | --- |
-| Overnight run on Fire TV Stick | In progress |
+| A long run on version 2 | Not tested yet |
 | Schedules on a real TV | Not tested |
 | Network drop on Fire TV Stick | Not tested |
 | Video with sound on Fire TV Stick | Not tested |
@@ -52,7 +53,8 @@ What has been tested on real setups, and what hasn't. Last updated November 2, 2
 | Fire TV Stick on Fire OS | Works in Silk. See the table above for what's left |
 | Fire TV devices on Vega OS (such as the 4K Select) | Not recommended: they block the normal way of installing kiosk browsers |
 | Computer connected by HDMI | Works |
-| Roku TV or Roku player | No full web browser, so plug a supported device into HDMI |
+| Roku TV | No full web browser, but works with a Fire TV Stick plugged into HDMI. Tested overnight |
+| Roku player | No full web browser, so use a supported device instead |
 | Apple TV | No web browser, so use a supported device instead |
 | Google TV devices | Not tested |
 | Raspberry Pi | Not tested |
