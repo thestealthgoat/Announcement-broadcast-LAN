@@ -28,7 +28,8 @@ export const ENCODERS = {
 };
 
 export const SEGMENT_SECONDS = 1;
-export const RTMP_KEY = 'feed';
+// Fixed, and not a secret: ffmpeg's RTMP listener has no way to check it and accepts any name.
+export const RTMP_STREAM_NAME = 'feed';
 export const PLAYLIST = 'index.m3u8';
 
 // Never upscales: only sources bigger than 1080p are reduced.
@@ -47,7 +48,7 @@ export function encoderTestArgs(encoder) {
 }
 
 export function inputArgs(feed, platform = process.platform) {
-  if (feed.input === 'rtmp') return ['-listen', '1', '-analyzeduration', '1000000', '-i', `rtmp://0.0.0.0:${feed.port}/live/${RTMP_KEY}`];
+  if (feed.input === 'rtmp') return ['-listen', '1', '-analyzeduration', '1000000', '-i', `rtmp://0.0.0.0:${feed.port}/live/${RTMP_STREAM_NAME}`];
   if (feed.input === 'srt') return ['-analyzeduration', '1000000', '-i', `srt://0.0.0.0:${feed.port}?mode=listener`];
   if (platform === 'win32') {
     const audio = feed.audio_device ? `:audio=${feed.audio_device}` : '';
@@ -120,7 +121,7 @@ export function playlistSegments(text) {
 export function senderAddress(feed, host) {
   if (feed.input === 'rtmp') {
     const url = `rtmp://${host}:${feed.port}/live`;
-    return { url, key: RTMP_KEY, full: `${url}/${RTMP_KEY}` };
+    return { url, streamName: RTMP_STREAM_NAME, full: `${url}/${RTMP_STREAM_NAME}` };
   }
   if (feed.input === 'srt') return { url: `srt://${host}:${feed.port}?mode=caller`, host, port: feed.port };
   return null;

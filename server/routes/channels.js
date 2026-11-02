@@ -97,10 +97,19 @@ export default async function channelRoutes(app, { db, hub }) {
     const c = getChannel(req.params.id);
     assertAccess(req, c.id);
     const screens = db.all('SELECT id FROM screens WHERE channel_id = ?', c.id);
-    db.run('DELETE FROM channels WHERE id = ?', c.id);
+    const cleared = db.tx(() => {
+      db.run('DELETE FROM channels WHERE id = ?', c.id);
+      // The deleted channel's rows cascade away, which can leave an override aimed at nothing.
+      return db.run(
+        `UPDATE overrides SET cleared_at = ? WHERE cleared_at IS NULL AND all_channels = 0
+         AND NOT EXISTS (SELECT 1 FROM override_channels oc WHERE oc.override_id = overrides.id)`,
+        Date.now(),
+      ).changes;
+    });
     for (const s of screens) hub.assignScreen(s.id);
     hub.adminRefresh('channels');
     hub.adminRefresh('screens');
+    if (cleared) hub.adminRefresh('overrides');
     return { ok: true };
   });
 

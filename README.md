@@ -51,8 +51,8 @@ Create the feed first. The **Live Feeds** page shows the exact address to use, w
 
 **RTMP**
 
-- **OBS:** go to **Settings > Stream**, choose **Custom** as the service, then paste the **Server** and **Stream key** from the Live Feeds page.
-- **vMix:** go to **Settings > Streaming**, choose **Custom RTMP Server**, then paste the server as the URL and the stream key as the stream name.
+- **OBS:** go to **Settings > Stream**, choose **Custom** as the service, then paste the **Server** from the Live Feeds page, and what it shows for the **Stream key** box.
+- **vMix:** go to **Settings > Streaming**, choose **Custom RTMP Server**, then paste the server as the URL, and what the page shows for the stream key box as the stream name.
 
 **SRT** is offered only if this computer's copy of ffmpeg supports it. If you don't see it as an option, use RTMP. Set the sender to **Caller** mode, with the address shown on the Live Feeds page.
 
@@ -62,7 +62,9 @@ Turn on automatic reconnect in your sender. The feed stops listening for a momen
 
 ### Security
 
-- **Never port-forward a feed's port.** The app's local network filter covers its web pages and video, but not these ports, because ffmpeg listens on them directly. Anyone who can reach the port can send video to your TVs. The stream key is not a password, because ffmpeg accepts any key.
+- **Anyone on the network who can reach a feed's port can send video to this feed.** While nothing else is sending, whatever they send plays on your TVs. OBS and vMix ask for a stream key, but it only fills in that box: it isn't a password, because ffmpeg accepts any key.
+- **Use a separate network if you share this one.** If guests or the public are on your network, put the host computer and the computer sending the video, such as a production trailer, on their own separate network, so nobody else can reach these ports.
+- **Never port-forward a feed's port.** The app's local network filter covers its web pages and video, but not these ports, because ffmpeg listens on them directly.
 - **Anyone on your network can watch a channel,** including its live feeds, since TV addresses don't require signing in.
 
 ### Network load
