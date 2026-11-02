@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { startServer, setupAdmin, ffmpegMake, form, waitForMedia } from './helpers.js';
-import { resolveFfmpeg } from '../server/media.js';
+import { resolveFfmpeg, createProgressParser } from '../server/media.js';
 
 test('video upload is transcoded to H.264/AAC MP4 with a thumbnail and served with ranges', async (t) => {
   const { base, dataDir } = await startServer(t);
@@ -75,4 +75,19 @@ test('web items allow only http(s) and never YouTube; .m3u8 becomes an HLS item'
   }
   assert.equal((await admin.post('/api/media/url', { url: 'https://example.com/menu' })).data.type, 'web');
   assert.equal((await admin.post('/api/media/url', { url: 'http://10.0.0.5/live/stream.m3u8' })).data.type, 'hls');
+});
+
+test('ffmpeg output is parsed correctly wherever a chunk happens to split', () => {
+  const output = '  Duration: 00:01:40.00, start: 0.000000, bitrate: 900 kb/s\nframe=  10 fps=0 time=00:00:50.00 bitrate=1.0kbits/s speed=2x\r';
+  for (let cut = 0; cut <= output.length; cut++) {
+    const p = createProgressParser();
+    p.push(output.slice(0, cut));
+    p.push(output.slice(cut));
+    assert.equal(p.duration, 100, `split at ${cut}`);
+    assert.equal(p.percent, 50, `split at ${cut}`);
+  }
+  const unknown = createProgressParser();
+  unknown.push('Duration: N/A, bitrate: N/A\nframe= 1 time=00:00:07.50 bitrate=1\r');
+  assert.equal(unknown.duration, 7.5);
+  assert.equal(unknown.percent, null);
 });

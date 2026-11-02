@@ -31,6 +31,31 @@ function parseTime(h, m, s) {
   return Number(h) * 3600 + Number(m) * 60 + Number(s);
 }
 
+// Reads duration and position from ffmpeg's stderr, which can arrive split at any byte.
+export function createProgressParser() {
+  let pending = '';
+  let total = 0;
+  let time = 0;
+  return {
+    push(text) {
+      pending += text;
+      if (!total) {
+        const d = pending.match(/Duration: (\d+):(\d+):([\d.]+),/);
+        if (d) total = parseTime(d[1], d[2], d[3]);
+      }
+      for (const t of pending.matchAll(/time=(\d+):(\d+):([\d.]+)\s/g)) time = parseTime(t[1], t[2], t[3]);
+      pending = pending.slice(-256);
+    },
+    // A source with no stated duration still gets one from how far ffmpeg got.
+    get duration() {
+      return total || time;
+    },
+    get percent() {
+      return total ? Math.min(99, Math.floor((time / total) * 100)) : null;
+    },
+  };
+}
+
 export function createProcessor({ db, hub, mediaDir, ffmpeg = resolveFfmpeg(), log }) {
   const queue = [];
   let running = false;
@@ -62,8 +87,8 @@ export function createProcessor({ db, hub, mediaDir, ffmpeg = resolveFfmpeg(), l
   async function processVideo(media, dir) {
     const source = path.join(dir, media.file);
     const output = path.join(dir, 'video.mp4');
-    let total = 0;
-    let lastPct = -1;
+    const progress = createProgressParser();
+    let lastPct = null;
     await runFfmpeg(
       [
         '-i', source,
@@ -77,21 +102,17 @@ export function createProcessor({ db, hub, mediaDir, ffmpeg = resolveFfmpeg(), l
         output,
       ],
       (text) => {
-        const d = text.match(/Duration: (\d+):(\d+):([\d.]+)/);
-        if (d && !total) total = parseTime(d[1], d[2], d[3]);
-        const t = text.match(/time=(\d+):(\d+):([\d.]+)/);
-        if (t && total) {
-          const pct = Math.min(99, Math.floor((parseTime(t[1], t[2], t[3]) / total) * 100));
-          if (pct !== lastPct) {
-            lastPct = pct;
-            db.run('UPDATE media SET progress = ? WHERE id = ?', pct, media.id);
-            hub.adminRefresh('media');
-          }
+        progress.push(text);
+        const pct = progress.percent;
+        if (pct !== null && pct !== lastPct) {
+          lastPct = pct;
+          db.run('UPDATE media SET progress = ? WHERE id = ?', pct, media.id);
+          hub.adminRefresh('media');
         }
       },
     );
     await runFfmpeg([
-      '-ss', String(Math.min(1, total / 2)), '-i', output,
+      '-ss', String(Math.min(1, progress.duration / 2)), '-i', output,
       '-frames:v', '1', '-vf', 'scale=480:-2', '-q:v', '4', path.join(dir, 'thumb.jpg'),
     ]);
     const size = fs.statSync(output).size;
@@ -99,7 +120,7 @@ export function createProcessor({ db, hub, mediaDir, ffmpeg = resolveFfmpeg(), l
     db.run(
       `UPDATE media SET status = 'ready', progress = NULL, file = 'video.mp4', thumb = 'thumb.jpg',
        duration = ?, size = ?, rev = rev + 1 WHERE id = ?`,
-      total || null, size, media.id,
+      progress.duration || null, size, media.id,
     );
   }
 

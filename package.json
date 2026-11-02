@@ -1,7 +1,7 @@
 {
   "name": "network-signage",
   "productName": "Network Signage",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Open-source, self-hosted digital signage for your local network.",
   "license": "MIT",
   "type": "module",
