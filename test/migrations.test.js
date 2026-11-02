@@ -46,6 +46,8 @@ test('a real 1.0.x database upgrades and keeps its data', () => {
   assert.equal(db.get('SELECT slug FROM channels').slug, 'gym', 'no extra default channel on upgrade');
   assert.equal(db.all('SELECT * FROM channels').length, 1);
   assert.equal(db.get('SELECT duration FROM playlist_items').duration, 7);
+  const item = db.get('SELECT start_date, end_date, start_time, end_time, days FROM playlist_items');
+  assert.deepEqual({ ...item }, { start_date: null, end_date: null, start_time: null, end_time: null, days: null }, 'existing items stay always on');
   db.close();
   const db2 = openDb(file);
   assert.equal(db2.all('SELECT * FROM playlist_items').length, 1, 'reopening is safe');

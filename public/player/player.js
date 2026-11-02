@@ -7,6 +7,10 @@
   var PRELOAD_LEAD_S = 8;
   var STALL_S = 15;
   var MAX_CACHE_FILE = 500 * 1024 * 1024;
+  var SCHEDULE_CHECK_TICKS = 15; // tick() runs once a second
+  var CLOCK_KEY = 'signage-clock-offset';
+
+  var Schedule = window.SignageSchedule;
 
   var pathParts = location.pathname.split('/');
   var slug = pathParts[1] === 'play' && pathParts[2] ? decodeURIComponent(pathParts[2]) : null;
@@ -34,6 +38,11 @@
   var zIndex = 1;
   var idleEl = null;
   var lastProgress = { time: -1, at: 0 };
+  var clockOffset = null;    // host wall clock minus this TV's clock, so a wrong TV clock doesn't matter
+  var storedOffset = null;
+  var activeSlides = [];     // playlist slides on at the last check; indexes point into this list
+  var ticksSinceCheck = 0;
+  var pendingKey = null;     // the slide being loaded to replace the current one
 
   // ---------- storage helpers ----------
 
@@ -415,6 +424,7 @@
     var outgoing = current;
     var transition = prep.slide.transition;
     hideIdle();
+    pendingKey = null;
     incoming.style.zIndex = String(++zIndex);
     incoming.style.visibility = 'visible';
 
@@ -450,9 +460,77 @@
 
   // ---------- playback ----------
 
+  // Stays the same between schedule checks, so indexes keep meaning the same slides.
   function activeList() {
     if (!state) return [];
-    return state.override ? state.override.slides : state.slides;
+    return state.override ? state.override.slides : activeSlides;
+  }
+
+  function setClock(clock) {
+    var wall = Schedule ? Schedule.parseWall(clock) : null;
+    if (wall === null) return;
+    clockOffset = wall - Date.now();
+    // Kept so a TV that reloads while the server is away still follows the host's clock.
+    if (!isPreview && (storedOffset === null || Math.abs(clockOffset - storedOffset) > 5000)) {
+      storedOffset = clockOffset;
+      store(CLOCK_KEY, String(clockOffset));
+    }
+  }
+
+  function loadClock() {
+    var saved = load(CLOCK_KEY);
+    var offset = saved === null ? NaN : Number(saved);
+    if (!isNaN(offset)) clockOffset = storedOffset = offset;
+  }
+
+  function wallNow() {
+    return clockOffset === null ? Schedule.localClock(new Date()) : Schedule.formatWall(Date.now() + clockOffset);
+  }
+
+  function scheduledSlides() {
+    var out = [];
+    var wall = null;
+    for (var i = 0; i < state.slides.length; i++) {
+      var s = state.slides[i];
+      if (s.schedule) {
+        if (!Schedule) continue;
+        if (wall === null) wall = wallNow();
+        if (!Schedule.isActive(s.schedule, wall)) continue;
+      }
+      out.push(s);
+    }
+    return out;
+  }
+
+  function keysOf(list) {
+    var keys = [];
+    for (var i = 0; i < list.length; i++) keys.push(list[i].key);
+    return keys.join('\n');
+  }
+
+  function indexOfKey(list, key) {
+    for (var i = 0; i < list.length; i++) {
+      if (list[i].key === key) return i;
+    }
+    return -1;
+  }
+
+  function checkSchedule() {
+    ticksSinceCheck = 0;
+    if (!state || state.override) return;
+    if (keysOf(scheduledSlides()) !== keysOf(activeSlides)) reconcile();
+  }
+
+  // Where to go when the current slide has left the list: whatever comes after it in the full playlist.
+  function successorIndex(list, fallback) {
+    var slides = state.slides;
+    var from = indexOfKey(slides, current.slide.key);
+    if (from < 0) return fallback;
+    for (var i = 1; i < slides.length; i++) {
+      var at = indexOfKey(list, slides[(from + i) % slides.length].key);
+      if (at >= 0) return at;
+    }
+    return fallback;
   }
 
   function arm() {
@@ -494,13 +572,15 @@
     var token = ++showToken;
     var ready = prepared;
     prepared = null;
+    pendingKey = slide.key;
     if (ready && ready.slide.key === slide.key) {
       if (ready.isReady) return swapIn(ready);
       if (!ready.failed) {
         ready.onReady = function (ok) {
-          if (token !== showToken) return;
-          if (ok) swapIn(ready);
-          else showFresh(slide, token, true);
+          if (token !== showToken) return dispose(ready);
+          if (ok) return swapIn(ready);
+          dispose(ready);
+          showFresh(slide, token, true);
         };
         return;
       }
@@ -527,13 +607,15 @@
 
   function skipBroken() {
     failures += 1;
+    pendingKey = null;
     var list = activeList();
     clearTimeout(endTimer);
     if (failures >= Math.max(list.length, 1)) {
       // Everything is failing: back off so this doesn't spin, and try again shortly.
       failures = 0;
+      // Nothing else can show, and a slide whose schedule ended must not stay up.
+      if (!current || indexOfKey(list, current.slide.key) < 0) showIdle();
       endTimer = setTimeout(advance, 10000);
-      if (!current) showIdle();
       return;
     }
     endTimer = setTimeout(advance, 500);
@@ -574,6 +656,7 @@
       state.override = null;
       reconcile();
     }
+    if (++ticksSinceCheck >= SCHEDULE_CHECK_TICKS) checkSchedule();
     var left = remainingSeconds();
     if (left !== null && left <= PRELOAD_LEAD_S) prepareNext();
 
@@ -592,6 +675,7 @@
 
   function showIdle() {
     showToken++;
+    pendingKey = null;
     clearTimeout(endTimer);
     deadline = null;
     dispose(prepared);
@@ -627,6 +711,7 @@
 
   // Applies a new state without interrupting what is playing, unless it must change.
   function reconcile() {
+    activeSlides = state ? scheduledSlides() : [];
     var list = activeList();
     var newMode = state && state.override ? 'o' + state.override.id : 'playlist';
     var modeChanged = newMode !== mode;
@@ -639,19 +724,23 @@
     }
     if (!list.length) return showIdle();
 
-    var position = -1;
-    if (current) {
-      for (var i = 0; i < list.length; i++) {
-        if (list[i].key === current.slide.key) position = i;
-      }
-    }
+    var position = current ? indexOfKey(list, current.slide.key) : -1;
     if (position >= 0 && !modeChanged) {
-      indexes[mode] = position;
+      var pending = pendingKey === null ? -1 : indexOfKey(list, pendingKey);
+      indexes[mode] = pending >= 0 ? pending : position;
+      if (pendingKey !== null && pending < 0) {
+        // The slide on its way in just left the list, so it must not appear.
+        showToken++;
+        pendingKey = null;
+        advance();
+        return;
+      }
       if (deadline === null && current.slide.duration) arm();
       return;
     }
     if (modeChanged && mode !== 'playlist') indexes[mode] = 0;
     var start = indexes[mode] || 0;
+    if (current && !modeChanged && mode === 'playlist') start = successorIndex(list, start);
     if (start >= list.length) start = 0;
     indexes[mode] = start;
     show(list[start]);
@@ -705,6 +794,7 @@
     lastMessageAt = Date.now();
     var msg;
     try { msg = JSON.parse(ev.data); } catch (e) { return; }
+    if (msg.clock) setClock(msg.clock);
     if (msg.type === 'state') {
       onState(msg, false);
     } else if (msg.type === 'pair') {
@@ -788,6 +878,7 @@
 
   setupFullscreen();
   if (!isPreview) {
+    loadClock();
     var savedState = load('signage-last-state:' + (slug || ''));
     if (savedState) {
       try { onState(JSON.parse(savedState), true); } catch (e) {}

@@ -49,6 +49,11 @@ export async function channelsView(main, ctx) {
   return { refresh: (s) => s.includes('channels') && guard(refresh) };
 }
 
+const DAY_NAMES = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+const ALL_DAYS = 127;
+const STATUS_LABEL = { on: 'On now', scheduled: 'Scheduled', ended: 'Ended' };
+const STATUS_REFRESH_MS = 30000;
+
 function formatDuration(seconds) {
   if (!seconds) return '';
   const m = Math.floor(seconds / 60);
@@ -70,8 +75,108 @@ export async function channelView(main, ctx, id) {
   const open = new Set();
   let dragging = false;
   let items = [];
+  // Times waiting for their other half. They can only be saved as a pair, and a refresh must not lose them.
+  const timeDrafts = new Map();
 
   const save = (itemId, patch) => guard(() => api.patch(`/api/playlist-items/${itemId}`, patch));
+
+  // Saves a schedule change and updates the row in place, because a re-render would close
+  // a date or time picker. On a refusal, the field goes back to what is saved.
+  async function saveSchedule(item, patch, revert) {
+    const updated = await save(item.id, patch);
+    if (!updated) {
+      revert();
+      return;
+    }
+    Object.assign(item, updated);
+    listEl.querySelector(`[data-id="${item.id}"] [data-status]`)?.replaceWith(statusLine(item));
+  }
+
+  function scheduleSection(item) {
+    const dateInput = (key) => {
+      const input = h('input', {
+        type: 'date',
+        value: item[key] ?? '',
+        onchange: () => {
+          // Typing a year passes through values like 0002-11-01. Wait for the rest of it.
+          if (input.value && input.value < '2000') return;
+          const revert = () => { input.value = item[key] ?? ''; };
+          saveSchedule(item, { [key]: input.value || null }, () => {
+            // Still being typed in, so leave it until they move on.
+            if (document.activeElement === input) input.addEventListener('blur', revert, { once: true });
+            else revert();
+          });
+        },
+      });
+      return input;
+    };
+
+    const draft = timeDrafts.get(item.id);
+    const timeHint = h('p', { class: 'muted small', hidden: !draft }, 'Add the other time to save this. Both are needed.');
+    const commitTimes = () => {
+      const [start, end] = [startTime.value, endTime.value];
+      const waiting = !start !== !end;
+      timeHint.hidden = !waiting;
+      if (waiting) {
+        timeDrafts.set(item.id, { startTime: start, endTime: end });
+        return;
+      }
+      timeDrafts.delete(item.id);
+      if (start === (item.startTime ?? '') && end === (item.endTime ?? '')) return;
+      saveSchedule(item, { startTime: start || null, endTime: end || null }, () => {
+        startTime.value = item.startTime ?? '';
+        endTime.value = item.endTime ?? '';
+      });
+    };
+    const startTime = h('input', { type: 'time', value: draft ? draft.startTime : item.startTime ?? '', onchange: commitTimes });
+    const endTime = h('input', { type: 'time', value: draft ? draft.endTime : item.endTime ?? '', onchange: commitTimes });
+
+    const dayOn = (i) => item.days === null || (item.days & (1 << i)) !== 0;
+    const dayChecks = DAY_NAMES.map((_, i) => h('input', {
+      type: 'checkbox',
+      checked: dayOn(i),
+      onchange: () => {
+        const mask = dayChecks.reduce((sum, c, n) => sum + (c.checked ? 1 << n : 0), 0);
+        saveSchedule(item, { days: mask === ALL_DAYS ? null : mask }, () => {
+          dayChecks.forEach((c, n) => { c.checked = dayOn(n); });
+        });
+      },
+    }));
+
+    return h('fieldset', { class: 'schedule' },
+      h('legend', {}, 'Schedule'),
+      h('p', { class: 'muted small' }, 'Leave these empty to show this item all the time. Schedules follow the clock on the computer running Network Signage, not the TV.'),
+      h('div', { class: 'row' }, field('Start date', dateInput('startDate')), field('End date', dateInput('endDate'))),
+      h('div', { class: 'row', style: 'margin-top:8px' }, field('Start time', startTime), field('End time', endTime)),
+      timeHint,
+      h('p', { class: 'muted small', style: 'margin-top:8px' }, 'If the end time is earlier than the start time, it runs overnight and finishes the next morning.'),
+      h('div', { class: 'days', role: 'group', 'aria-label': 'Days of the week' },
+        DAY_NAMES.map((name, i) => h('label', { class: 'day' }, dayChecks[i], h('span', {}, name)))),
+      h('button', {
+        class: 'ghost',
+        onclick: () => guard(async () => {
+          timeDrafts.delete(item.id);
+          const updated = await api.patch(`/api/playlist-items/${item.id}`, { startDate: null, endDate: null, startTime: null, endTime: null, days: null });
+          Object.assign(item, updated);
+          render();
+          toast('Schedule cleared. This item now shows all the time.');
+        }),
+      }, 'Clear schedule'),
+    );
+  }
+
+  function statusLine(item) {
+    const m = item.media;
+    const text = m.status === 'processing'
+      ? `Converting${m.progress != null ? ` ${m.progress}%` : '…'}`
+      : m.status === 'failed'
+        ? (m.error ?? 'Failed')
+        : [TYPE_LABEL[m.type], m.pages ? `${m.pages} pages` : null, m.type === 'video' && !item.duration ? formatDuration(m.duration) : item.duration ? `${item.duration}s` : null, item.audio ? 'sound on' : null, !item.enabled ? 'hidden' : null].filter(Boolean).join(' · ');
+    return h('div', { class: `small ${m.status === 'failed' ? 'err' : 'muted'}`, 'data-status': '' },
+      text, ' ',
+      m.status === 'ready' && item.enabled && h('span', { class: `sched sched-${item.scheduleStatus}` }, STATUS_LABEL[item.scheduleStatus]),
+    );
+  }
 
   function settings(item) {
     const isVideo = item.media.type === 'video';
@@ -98,6 +203,7 @@ export async function channelView(main, ctx, id) {
           onchange: (e) => save(item.id, { enabled: e.target.checked }),
         }),
       ),
+      scheduleSection(item),
       h('button', {
         class: 'ghost danger-text',
         style: 'margin-top:4px',
@@ -112,17 +218,12 @@ export async function channelView(main, ctx, id) {
 
   function row(item) {
     const m = item.media;
-    const status = m.status === 'processing'
-      ? `Converting${m.progress != null ? ` ${m.progress}%` : '…'}`
-      : m.status === 'failed'
-        ? (m.error ?? 'Failed')
-        : [TYPE_LABEL[m.type], m.pages ? `${m.pages} pages` : null, m.type === 'video' && !item.duration ? formatDuration(m.duration) : item.duration ? `${item.duration}s` : null, item.audio ? 'sound on' : null, !item.enabled ? 'hidden' : null].filter(Boolean).join(' · ');
     const expanded = open.has(item.id);
     return h('div', { class: `pl-item${item.enabled ? '' : ' off'}`, 'data-id': item.id },
       h('div', { class: 'tile' },
         h('span', { class: 'handle', 'aria-label': 'Drag to reorder', title: 'Drag to reorder' }, '⠿'),
         thumb(m),
-        h('div', { class: 'grow' }, h('div', { class: 'title' }, m.name), h('div', { class: `small ${m.status === 'failed' ? 'err' : 'muted'}` }, status)),
+        h('div', { class: 'grow' }, h('div', { class: 'title' }, m.name), statusLine(item)),
         h('button', {
           class: 'ghost',
           'aria-expanded': String(expanded),
@@ -147,6 +248,18 @@ export async function channelView(main, ctx, id) {
     if (dragging || listEl.contains(document.activeElement) && document.activeElement.tagName !== 'BUTTON') return;
     items = await api.get(`/api/channels/${id}/items`);
     render();
+  }
+
+  // Statuses change with the clock, not just when someone edits something. Only the
+  // status lines change here, so this is safe while someone is using a field.
+  async function refreshStatuses() {
+    const fresh = await api.get(`/api/channels/${id}/items`);
+    for (const f of fresh) {
+      const item = items.find((i) => i.id === f.id);
+      if (!item || item.scheduleStatus === f.scheduleStatus) continue;
+      item.scheduleStatus = f.scheduleStatus;
+      listEl.querySelector(`[data-id="${item.id}"] [data-status]`)?.replaceWith(statusLine(item));
+    }
   }
 
   function addFromLibrary() {
@@ -215,6 +328,7 @@ export async function channelView(main, ctx, id) {
   );
 
   await refresh();
+  const statusTimer = setInterval(() => refreshStatuses().catch(() => {}), STATUS_REFRESH_MS);
   const sortable = window.Sortable.create(listEl, {
     handle: '.handle',
     animation: 150,
@@ -231,6 +345,7 @@ export async function channelView(main, ctx, id) {
   return {
     refresh: (s) => (s.includes('channels') || s.includes('media')) && guard(refresh),
     destroy: () => {
+      clearInterval(statusTimer);
       sortable.destroy();
       observer.disconnect();
     },

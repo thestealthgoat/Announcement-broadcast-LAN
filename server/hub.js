@@ -1,10 +1,17 @@
 import { randomInt } from 'node:crypto';
 import { VERSION } from './version.js';
+import { wallClock } from './schedule.js';
 
 const PING_MS = 15000;
 const DEAD_MS = 45000;
 const DEFAULT_STILL_SECONDS = 10;
 const DEFAULT_LIVE_SECONDS = 60;
+
+// A playlist row's schedule, or null when it runs all the time.
+function scheduleOf(r) {
+  if (r.start_date === null && r.end_date === null && r.start_time === null && r.end_time === null && r.days === null) return null;
+  return { startDate: r.start_date, endDate: r.end_date, startTime: r.start_time, endTime: r.end_time, days: r.days };
+}
 
 // Turns one library item into the slides a player shows. A PDF becomes one slide per page.
 export function toSlides(media, placement) {
@@ -15,6 +22,7 @@ export function toSlides(media, placement) {
     transition: placement.transition ?? 'fade',
     audio: !!placement.audio,
     size: media.size ?? null,
+    schedule: placement.schedule ?? null,
   };
   const key = `${placement.key}:${media.id}:${media.rev}`;
   const still = placement.duration ?? DEFAULT_STILL_SECONDS;
@@ -91,18 +99,20 @@ export function createHub(db, log) {
 
   function channelState(channel) {
     const rows = db.all(
-      `SELECT p.id AS pid, p.duration AS p_duration, p.transition, p.audio, m.*
+      `SELECT p.id AS pid, p.duration AS p_duration, p.transition, p.audio,
+              p.start_date, p.end_date, p.start_time, p.end_time, p.days, m.*
        FROM playlist_items p JOIN media m ON m.id = p.media_id
        WHERE p.channel_id = ? AND p.enabled = 1 AND m.status = 'ready'
        ORDER BY p.position, p.id`,
       channel.id,
     );
     const slides = rows.flatMap((r) =>
-      toSlides(r, { key: `p${r.pid}`, duration: r.p_duration, transition: r.transition, audio: r.audio }),
+      toSlides(r, { key: `p${r.pid}`, duration: r.p_duration, transition: r.transition, audio: r.audio, schedule: scheduleOf(r) }),
     );
     return {
       type: 'state',
       version: VERSION,
+      clock: wallClock(),
       channel: { id: channel.id, slug: channel.slug, name: channel.name },
       slides,
       override: overrideFor(channel.id),
@@ -242,9 +252,11 @@ export function createHub(db, log) {
 
   const ticker = setInterval(() => {
     const now = Date.now();
+    // Pings carry the clock so TVs stay in step across daylight saving and clock changes.
+    const clock = wallClock();
     for (const p of players) {
       if (now - p.lastMessage > DEAD_MS) p.socket.terminate();
-      else send(p.socket, { type: 'ping' });
+      else send(p.socket, { type: 'ping', clock });
     }
     for (const a of admins) send(a, { type: 'ping' });
   }, PING_MS);
