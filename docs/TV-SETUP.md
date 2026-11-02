@@ -35,6 +35,23 @@ Fully Kiosk is the best fit. It starts on boot, keeps the screen on, reloads aft
 
 Silk works for quick use, but it does not start on boot, and the Fire TV may sleep during still images. Open the address and press **Select** on the remote to go fullscreen.
 
+## Network Signage kiosk app (new, not tested on devices)
+
+**This app is new and has never run on a real TV.** It has only been compiled and unit tested, so use Fully Kiosk for anything that matters until it's been tested. There's no download yet: build it by following [android/README.md](../android/README.md).
+
+It's a small app for Fire OS and Google TV that shows the player fullscreen, with no browser controls. It's meant for Fire TV devices on Fire OS 6 or newer, including the Fire TV Stick 4K Max (2nd gen), and Google TV. It won't run on Vega OS devices such as the 4K Select.
+
+1. Install the APK with `adb`, as described in the README.
+2. Open **Network Signage** from the TV's apps.
+3. Choose your server from the list. If it isn't there, type the address shown under **Show address and QR code** in the tray menu.
+4. Pair the TV in the admin as usual.
+
+To change the server or leave the app, hold **Back** or **Menu** for about 2 seconds, or press **Back** three times quickly. One press of Back won't close it.
+
+If the server can't be reached, the TV shows a "Trying to reach your signage server" screen and keeps trying on its own.
+
+**Starting after a power cut may not work.** Android 10 and newer, including Fire OS 8 and Google TV, normally block apps from opening themselves at startup. On those devices, select **Allow starting after power-on** on the server screen, which opens the system's "display over other apps" setting. Some devices don't have that setting, and it's optional. Without it, someone may need to open the app by hand after a restart. The README has the details and an `adb` alternative.
+
 ## Samsung and LG built-in browsers (best effort)
 
 1. Open the TV's Internet or Web Browser app and go to your TV address.
