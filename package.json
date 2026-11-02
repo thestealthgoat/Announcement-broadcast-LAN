@@ -10,7 +10,7 @@
     "start": "node server/cli.js",
     "reset-admin": "node server/reset-admin.js",
     "dev": "node --watch server/cli.js",
-    "test": "node --test test/",
+    "test": "node --test \"test/*.test.js\"",
     "tray": "electron .",
     "icons": "node scripts/make-icons.mjs",
     "dist:mac": "node scripts/prep-ffmpeg.mjs darwin arm64 && node scripts/prep-ffmpeg.mjs darwin x64 && electron-builder --mac pkg --arm64 && electron-builder --mac pkg --x64",
