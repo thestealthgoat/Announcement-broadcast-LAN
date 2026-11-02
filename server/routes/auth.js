@@ -23,7 +23,7 @@ export function username(value) {
   return v;
 }
 
-export default async function authRoutes(app, { db, port, limiter }) {
+export default async function authRoutes(app, { db, port, limiter, backup }) {
   const hasUsers = () => !!db.get('SELECT 1 AS x FROM users LIMIT 1');
 
   app.get('/api/setup/status', async () => ({ needsSetup: !hasUsers() }));
@@ -36,6 +36,8 @@ export default async function authRoutes(app, { db, port, limiter }) {
     const uname = username(b.username);
     const hash = await hashPassword(password(b.password));
     if (hasUsers()) throw httpError(409, 'Setup is already complete.');
+    // A restore accepted while the password was hashing is about to replace this database.
+    if (backup.restarting) throw httpError(409, 'A backup is being restored, so setup was stopped.');
     const { lastInsertRowid } = db.run(
       "INSERT INTO users (username, name, password_hash, role, can_override, role_id, created_at) VALUES (?, ?, ?, 'admin', 1, ?, ?)",
       uname, name, hash, ROLE_IDS.admin, Date.now(),

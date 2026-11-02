@@ -36,7 +36,7 @@ async function prepareImage(file) {
   }
 }
 
-function send(url, blob, name, onProgress) {
+export function send(url, blob, name, onProgress) {
   return new Promise((resolve, reject) => {
     const form = new FormData();
     form.append('file', blob, name);

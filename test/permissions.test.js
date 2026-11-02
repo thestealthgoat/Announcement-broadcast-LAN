@@ -2,6 +2,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { startServer, client, setupAdmin, form } from './helpers.js';
+import { RESTORE_CONFIRMATION } from '../server/routes/backup.js';
 import { PERMISSIONS } from '../server/permissions.js';
 
 const ALL = PERMISSIONS.map((p) => p.key);
@@ -12,6 +13,9 @@ const JPEG = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 
 // Open to anyone or to any signed-in person, on purpose.
 const PUBLIC = new Set([
   'POST /api/setup', // Refuses once any account exists.
+  // Same reason as setup: a new computer has nobody to sign in as. It refuses once any account
+  // exists, and checks again at the moment it would apply. test/backup.test.js proves both.
+  'POST /api/setup/restore',
   'POST /api/login',
   'POST /api/logout',
   'POST /api/me/password', // Self-service, and needs the current password.
@@ -20,8 +24,9 @@ const PUBLIC = new Set([
 let counter = 0;
 const unique = (prefix) => `${prefix}${++counter}`;
 
-// `perms` passes the route's check, any one of them being enough. `prepare` builds fresh data for
-// each attempt, as the signed-in tester `who`. `expect` is for a route that can't finish here.
+// `perms` passes the route's check, any one of them being enough, or all of them for `together`.
+// `prepare` builds fresh data for each attempt, as the signed-in tester `who`. `expect` is for a
+// route that can't finish here.
 const ROUTES = [
   ['POST /api/users', ['users.manage'], async ({ admin }) => ({ body: { username: unique('new'), name: 'New', password: 'password-1', roleId: await newRole(admin) } })],
   ['PATCH /api/users/:id', ['users.manage'], async ({ admin }) => ({ id: await newUser(admin), body: { name: 'Changed' } })],
@@ -75,6 +80,9 @@ const ROUTES = [
   ['POST /api/branding/font', ['settings.manage'], async () => ({ body: form('font.woff2', Buffer.from('font'), 'font/woff2') })],
   ['PUT /api/ops/settings', ['settings.manage'], async () => ({ body: { checkForUpdates: false } })],
   ['POST /api/notices/:id/dismiss', ['screens.manage', 'settings.manage'], async () => ({ id: 'not-showing', body: {} }), { expect: 404, sufficient: ['settings.manage'] }],
+
+  // Replaces everything including every account, so it takes every permission at once.
+  ['POST /api/backup/restore', ALL, async () => ({ query: `?confirm=${RESTORE_CONFIRMATION}`, body: form('not-a-backup.tar', Buffer.alloc(1024, 1), 'application/x-tar') }), { expect: 400, together: true }],
 
   ['POST /api/live-feeds', ['live.manage'], async () => ({ body: { name: 'Feed', input: 'rtmp', port: nextPort(), enabled: false } })],
   ['PATCH /api/live-feeds/:id', ['live.manage'], async ({ admin }) => ({ id: await newFeed(admin), body: { name: 'Renamed' } })],
@@ -178,8 +186,8 @@ test('each permission opens its routes, and nothing else does', async (t) => {
   for (const [route, perms, prepare, opts = {}] of ROUTES) {
     const [method, pattern] = route.split(' ');
     const attempt = async (who) => {
-      const { id, n, body } = await prepare({ admin, server, who });
-      const url = pattern.replace(':id', id).replace(':n', n);
+      const { id, n, body, query = '' } = await prepare({ admin, server, who });
+      const url = pattern.replace(':id', id).replace(':n', n) + query;
       return send(who, method, url, body);
     };
 
@@ -189,10 +197,11 @@ test('each permission opens its routes, and nothing else does', async (t) => {
       assert.equal((await attempt(lacking)).status, 403, 'refused without the permission');
 
       // Only what this route asks for, plus every channel so assignment isn't what's being tested.
-      for (const perm of opts.sufficient ?? perms) {
-        const holding = await tester([...new Set([perm, 'channels.all'])]);
+      const enough = opts.together ? [perms] : (opts.sufficient ?? perms).map((perm) => [perm]);
+      for (const held of enough) {
+        const holding = await tester([...new Set([...held, 'channels.all'])]);
         const r = await attempt(holding);
-        assert.equal(r.status, opts.expect ?? 200, `allowed with ${perm}: ${JSON.stringify(r.data)}`);
+        assert.equal(r.status, opts.expect ?? 200, `allowed with ${held}: ${JSON.stringify(r.data)}`);
       }
 
       assert.equal((await attempt(client(base))).status, 401, 'signed out');

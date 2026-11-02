@@ -29,6 +29,7 @@ What has been tested on real setups, and what hasn't. Last updated November 2, 2
 | Publishing on a real network | Only tested on loopback between two copies of the mDNS library: real multicast, a second real host using the same name, waking from sleep, and Android's NsdManager reading the server's ID are not tested |
 | Live feeds through hls.js with native fallback, on a TV or Android WebView | Only tested against a stand-in for the browser and hls.js |
 | Clearing a leftover ffmpeg on Windows | Not tested: the Windows command-line lookup has only been checked against a stand-in |
+| Backup and restore | Automated tests only, on one computer. A real move between two computers, and the tray app's restart after a restore, have not been tried |
 | Windows installer | Not tested yet |
 | Intel Mac installer | Built and inspected, not run |
 | `.pkg` install to Applications from a browser download | Not tested |

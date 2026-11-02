@@ -7,6 +7,7 @@ import { createStorageWatcher, formatBytes } from './storage.js';
 import { createDiscovery, serverId } from './discovery.js';
 import { screensNeedingAttention } from './health.js';
 import { hasPermission } from '../permissions.js';
+import { LAST_RESTORE_KEY } from '../backup/swap.js';
 
 const TICK_MS = 30 * 1000;
 const FIRST_UPDATE_CHECK_MS = 30 * 1000;
@@ -93,10 +94,23 @@ export function createOps({ db, hub, dataDir, port, host, log, deps = {} }) {
     const out = [];
     const seesScreens = hasPermission(user, 'screens.manage');
     const moved = seesScreens && address.notice();
+    const restored = db.getSetting(LAST_RESTORE_KEY, null);
     if (moved) {
+      const afterRestore = restored?.ok && moved.at >= restored.at;
       out.push({
         id: `address-${moved.to}`, kind: 'address', severity: 'warning', dismissible: true,
-        text: `This computer's network address changed from ${moved.from} to ${moved.to}. TVs using the old address need the new one: http://${moved.to}:${port()}/tv. To keep this from happening, reserve an address for this computer on your router (often called a DHCP reservation).`,
+        text: afterRestore
+          ? `The backup came from a computer at ${moved.from}, and this one is at ${moved.to}. TVs remember the server by its address, so they can't find this one yet. There are two ways to fix it. Reserve ${moved.from} for this computer on your router (often called a DHCP reservation), and TVs reconnect by themselves. Or re-pair each TV using http://${moved.to}:${port()}/tv.`
+          : `This computer's network address changed from ${moved.from} to ${moved.to}. TVs using the old address need the new one: http://${moved.to}:${port()}/tv. To keep this from happening, reserve an address for this computer on your router (often called a DHCP reservation).`,
+      });
+    }
+    if (restored && !restored.dismissed && hasPermission(user, 'settings.manage')) {
+      const made = new Date(restored.createdAt ?? NaN); // from the backup's manifest, so it may be anything
+      out.push({
+        id: `restore-${restored.id}`, kind: 'restore', severity: restored.ok ? 'info' : 'warning', dismissible: true,
+        text: restored.ok
+          ? `Your backup${Number.isNaN(made.getTime()) ? '' : ` from ${made.toLocaleDateString()}`} was restored.`
+          : restored.message,
       });
     }
     const disk = storage.snapshot();
@@ -157,6 +171,7 @@ export function createOps({ db, hub, dataDir, port, host, log, deps = {} }) {
       if (!notice?.dismissible) return false;
       if (notice.kind === 'address') address.dismiss();
       if (notice.kind === 'update') updates.dismiss(updates.available().version);
+      if (notice.kind === 'restore') db.setSetting(LAST_RESTORE_KEY, { ...db.getSetting(LAST_RESTORE_KEY, null), dismissed: true });
       return true;
     },
     attentionIds: () => new Set(needingAttention().map((s) => s.id)),

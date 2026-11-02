@@ -162,6 +162,7 @@ export function createProcessor({ db, hub, mediaDir, ffmpeg = resolveFfmpeg(), l
       queue.push(id);
       drain().catch((err) => log.error(err));
     },
+    busy: () => running || queue.length > 0,
     // Picks up work that a shutdown interrupted.
     resume() {
       for (const m of db.all("SELECT * FROM media WHERE status = 'processing'")) {

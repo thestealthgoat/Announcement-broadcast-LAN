@@ -1,4 +1,5 @@
 import { h, api, guard, field, checkbox, toast } from '../lib.js';
+import { backupCard } from './backup.js';
 
 function formatBytes(bytes) {
   if (bytes >= 1024 ** 3) return `${(bytes / 1024 ** 3).toFixed(1)} GB`;
@@ -122,6 +123,7 @@ export async function settingsView(main, ctx) {
       }),
       h('p', { class: 'muted small' }, 'Once a day, this computer asks GitHub if there is a newer version and tells you here. Nothing installs by itself. Turn this off and the server makes no internet requests.'),
     ),
+    ctx.me.fullAccess && backupCard(),
     h('section', { class: 'card' },
       h('h2', {}, 'About'),
       info && h('p', { class: 'small' }, 'Admin address: ', h('span', { class: 'code' }, `${info.urls[0]}/admin/`), h('br'), `Version ${info.version}`),

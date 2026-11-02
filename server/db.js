@@ -109,6 +109,8 @@ export function pendingMigrations(version, dir = MIGRATIONS_DIR) {
     .sort((a, b) => a.number - b.number);
 }
 
+export const latestSchemaVersion = (dir = MIGRATIONS_DIR) => Math.max(1, ...pendingMigrations(0, dir).map((m) => m.number));
+
 function migrate(raw, db) {
   let { user_version: version } = raw.prepare('PRAGMA user_version').get();
   if (version === 0) {
@@ -134,7 +136,12 @@ function migrate(raw, db) {
 
 export function openDb(file) {
   const raw = new DatabaseSync(file);
-  raw.exec('PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000;');
+  try {
+    raw.exec('PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000;');
+  } catch (err) {
+    raw.close();
+    throw err;
+  }
 
   const cache = new Map();
   const stmt = (sql) => {
@@ -172,6 +179,11 @@ export function openDb(file) {
     branding: () => ({ ...DEFAULT_BRANDING, ...db.getSetting('branding', {}) }),
   };
 
-  migrate(raw, db);
+  try {
+    migrate(raw, db);
+  } catch (err) {
+    raw.close(); // a restore that fails here moves this file next, and Windows needs it closed
+    throw err;
+  }
   return db;
 }
