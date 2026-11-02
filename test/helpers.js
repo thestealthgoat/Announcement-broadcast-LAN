@@ -17,6 +17,30 @@ export async function startServer(t, { ops = {} } = {}) {
   return { server, port, base: `http://127.0.0.1:${port}`, dataDir };
 }
 
+// Runs `fn` when the test ends, last added first, and every one runs even if another throws. t.after
+// itself runs hooks in the order they were added and stops at the first that throws, so a folder
+// that can't be removed yet (the server it belongs to is still writing there) would skip the hook
+// that stops that server, leaving it running, and any real ffmpeg with it.
+const endings = new WeakMap();
+export function atEnd(t, fn) {
+  if (!endings.has(t)) {
+    const stack = [];
+    endings.set(t, stack);
+    t.after(async () => {
+      let first = null;
+      for (const ending of stack.reverse()) {
+        try {
+          await ending();
+        } catch (err) {
+          first ??= err;
+        }
+      }
+      if (first) throw first;
+    });
+  }
+  endings.get(t).push(fn);
+}
+
 export function client(base) {
   let cookie = '';
   const call = async (method, url, body, headers = {}) => {

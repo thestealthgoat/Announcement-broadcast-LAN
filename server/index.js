@@ -11,7 +11,7 @@ import { openDb } from './db.js';
 import { createHub } from './hub.js';
 import { createProcessor, resolveFfmpeg } from './media.js';
 import { createLiveFeeds } from './live/supervisor.js';
-import { createHashBackfill } from './library.js';
+import { createHashBackfill, sweepOrphanFolders } from './library.js';
 import { isLocalAddress, baseUrls } from './lan.js';
 import { userFromToken, httpError, createLoginLimiter, COOKIE } from './auth.js';
 import { listAdmins, resetAdminPassword } from './recovery.js';
@@ -35,6 +35,8 @@ import backupRoutes from './routes/backup.js';
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const MAX_UPLOAD = 20 * 1024 ** 3;
 const MAX_BACKUP = 4 * 1024 ** 4; // Far past any real library, but still a limit on an upload anyone can reach during first-run.
+const STOP_GRACE_MS = 3000; // long enough for an ordinary request to finish
+const STOP_CUT_POLL_MS = 250;
 
 const VENDOR = {
   'hls.min.js': 'hls.js/dist/hls.min.js',
@@ -89,7 +91,9 @@ export async function createServer({ dataDir, port: portOption = 8080, host = '0
   fs.mkdirSync(dataDir, { recursive: true });
   // First, because nothing may have the database open while its files change.
   const restore = applyPendingRestore(dataDir);
-  fs.rmSync(path.join(dataDir, EXPORT_TMP_DIR), { recursive: true, force: true }); // from a crash
+  try {
+    fs.rmSync(path.join(dataDir, EXPORT_TMP_DIR), { recursive: true, force: true, maxRetries: 3, retryDelay: 100 }); // from a crash
+  } catch {} // Something has a file open. It does no harm, and the next start tries again.
   const port = typeof portOption === 'function' ? portOption() : portOption;
   const mediaDir = path.join(dataDir, 'media');
   fs.mkdirSync(mediaDir, { recursive: true });
@@ -227,6 +231,7 @@ export async function createServer({ dataDir, port: portOption = 8080, host = '0
     hub.closeAll();
   });
 
+  let stopping = null;
   return {
     app, db, hub, processor, ops, live, routes, hashBackfill,
     listAdmins: () => listAdmins(db),
@@ -236,6 +241,8 @@ export async function createServer({ dataDir, port: portOption = 8080, host = '0
       return temp;
     },
     async start() {
+      // Not on the boot a restore was dealt with, when the folders just changed underneath this.
+      if (restore.state === 'none') await sweepOrphanFolders({ db, mediaDir, log: app.log });
       await app.listen({ port, host });
       processor.resume();
       live.start();
@@ -244,9 +251,26 @@ export async function createServer({ dataDir, port: portOption = 8080, host = '0
       ops.start(); // Not awaited: a slow check must never hold up serving.
       return { port: portRef(), urls: baseUrls(portRef()) };
     },
-    async stop() {
-      await app.close();
-      db.close();
+    // A TV partway through a video, or a half-sent upload, would otherwise hold this open for as long
+    // as it likes, and whatever is quitting would wait on it. They get a short grace period, then
+    // they're cut off. It repeats because connections are still accepted until closing gets that far.
+    stop() {
+      stopping ??= (async () => {
+        const started = Date.now();
+        const cutter = setInterval(() => {
+          if (Date.now() - started >= STOP_GRACE_MS) {
+            app.server.closeAllConnections?.();
+            hub.closeAll(); // upgraded sockets aren't connections to closeAllConnections
+          }
+        }, STOP_CUT_POLL_MS);
+        try {
+          await app.close();
+        } finally {
+          clearInterval(cutter);
+          db.close();
+        }
+      })();
+      return stopping;
     },
   };
 }

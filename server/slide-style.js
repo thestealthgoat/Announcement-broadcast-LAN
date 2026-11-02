@@ -90,6 +90,23 @@ export function validateStyle(db, input) {
   return Object.keys(out).length ? out : null;
 }
 
+// Whether a stored design holds only what validateStyle allows. It doesn't ask whether its picture
+// or template still exists, because a saved design outlives a deleted one. Text that isn't a design
+// at all reads as no design, so it's harmless.
+const ANYTHING_EXISTS = { get: () => ({ type: 'image', status: 'ready' }) };
+export function isSafeStyle(json) {
+  if (json === null || json === undefined) return true;
+  if (typeof json !== 'string') return false;
+  const style = parseStyle(json);
+  if (!style) return true;
+  try {
+    validateStyle(ANYTHING_EXISTS, style);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 // What's stored, or null. A damaged value must never stop a TV from getting its slides.
 export function parseStyle(json) {
   if (!json) return null;

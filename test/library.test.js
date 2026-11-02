@@ -6,10 +6,11 @@ import path from 'node:path';
 import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { DatabaseSync } from 'node:sqlite';
-import { startServer, client, setupAdmin, form, waitForMedia, ffmpegMake, player } from './helpers.js';
+import { atEnd, startServer, client, setupAdmin, form, waitForMedia, ffmpegMake, player } from './helpers.js';
 import { createServer } from '../server/index.js';
 import { openDb } from '../server/db.js';
 import { createHashBackfill, isMediaUsed, mediaUsage } from '../server/library.js';
+import { createProcessor } from '../server/media.js';
 import { ROLE_IDS } from '../server/permissions.js';
 
 const PASSWORD = 'password-1';
@@ -549,4 +550,212 @@ test('deleting a channel or a folder never deletes the library item or its file'
   assert.equal(row.folder_id, null);
   assert.ok(fs.existsSync(path.join(dataDir, 'media', 'keep', 'image.png')));
   assert.equal((await admin.get('/api/library/keep')).data.usage.inUse, false);
+});
+
+// ---------- channel scope follows backgrounds and overrides ----------
+
+const seedImage = (server, dataDir, id, createdBy = null) => {
+  fs.mkdirSync(path.join(dataDir, 'media', id), { recursive: true });
+  fs.writeFileSync(path.join(dataDir, 'media', id, 'image.png'), PNG);
+  server.db.run("INSERT INTO media (id, type, name, status, file, created_by, created_at) VALUES (?, 'image', ?, 'ready', 'image.png', ?, ?)", id, id, createdBy, Date.now());
+};
+
+async function scopeWorld(t) {
+  const { server, base, dataDir } = await startServer(t);
+  const admin = await setupAdmin(base);
+  const a = await newChannel(admin, 'A');
+  const b = await newChannel(admin, 'B');
+  const ed = await makeUser(admin, base, 'ed', ROLE_IDS.editor, [a]);
+  return { server, base, dataDir, admin, a, b, ed };
+}
+
+test('a picture that is the background of a slide on another channel cannot be deleted or changed by an editor outside it', async (t) => {
+  const { server, dataDir, admin, a, b, ed } = await scopeWorld(t);
+  for (const id of ['bg-b', 'bg-a', 'bg-both', 'bg-unplaced']) seedImage(server, dataDir, id);
+  await admin.post(`/api/media/text?channelId=${b}`, { title: 'On B', style: { image: 'bg-b' } });
+  await admin.post(`/api/media/text?channelId=${a}`, { title: 'On A', style: { image: 'bg-a' } });
+  await admin.post(`/api/media/text?channelId=${a}`, { title: 'A too', style: { image: 'bg-both' } });
+  await admin.post(`/api/media/text?channelId=${b}`, { title: 'B too', style: { image: 'bg-both' } });
+  await admin.post('/api/media/text', { title: 'Nowhere', style: { image: 'bg-unplaced' } });
+
+  assert.equal((await ed.del('/api/media/bg-b')).status, 403);
+  assert.equal((await ed.patch('/api/media/bg-b', { name: 'Mine now' })).status, 403);
+  assert.equal((await ed.del('/api/media/bg-both')).status, 403);
+  const dry = await ed.post('/api/library/bulk/delete', { ids: ['bg-b', 'bg-both', 'bg-a'], dryRun: true });
+  assert.deepEqual(dry.data.results.map((r) => [r.id, r.ok, r.reason]), [['bg-b', false, 'scope'], ['bg-both', false, 'scope'], ['bg-a', true, undefined]]);
+  const bulk = await ed.post('/api/library/bulk/delete', { ids: ['bg-b', 'bg-both'], inUseConfirmed: ['bg-b', 'bg-both'] });
+  assert.deepEqual(bulk.data.results.map((r) => r.reason), ['scope', 'scope']);
+  const move = await ed.post('/api/library/bulk/move', { ids: ['bg-b'], folderId: null });
+  assert.equal(move.data.results[0].reason, 'scope');
+
+  // Only their own channel, or no channel at all: the same as before.
+  assert.equal((await ed.patch('/api/media/bg-a', { name: 'Fine' })).status, 200);
+  assert.equal((await ed.del('/api/media/bg-unplaced')).status, 200);
+  assert.equal((await admin.del('/api/media/bg-b')).status, 200, 'someone with every channel still can');
+});
+
+test('what an active override shows cannot be changed by an editor it reaches beyond', async (t) => {
+  const { server, dataDir, admin, a, b, ed } = await scopeWorld(t);
+  for (const id of ['ov-all', 'ov-b', 'ov-a', 'ov-style', 'ov-ended', 'ov-cleared', 'ov-behind']) seedImage(server, dataDir, id);
+  const all = await admin.post('/api/overrides', { mediaId: 'ov-all', allChannels: true });
+  assert.equal(all.status, 200, JSON.stringify(all.data));
+  await admin.post('/api/overrides', { mediaId: 'ov-b', channelIds: [b] });
+  await admin.post('/api/overrides', { mediaId: 'ov-a', channelIds: [a] });
+  await admin.post('/api/overrides', { title: 'Quick', style: { image: 'ov-style' }, allChannels: true });
+  const ended = await admin.post('/api/overrides', { mediaId: 'ov-ended', allChannels: true });
+  server.db.run('UPDATE overrides SET ends_at = 1 WHERE id = ?', ended.data.id);
+  const cleared = await admin.post('/api/overrides', { mediaId: 'ov-cleared', allChannels: true });
+  assert.equal((await admin.del(`/api/overrides/${cleared.data.id}`)).status, 200);
+
+  const slide = (await admin.post('/api/media/text', { title: 'Shown', style: { image: 'ov-behind' } })).data;
+  await admin.post('/api/overrides', { mediaId: slide.id, allChannels: true });
+  const text = (await admin.post('/api/media/text', { title: 'All of them' })).data;
+  await admin.post('/api/overrides', { mediaId: text.id, allChannels: true });
+  const active = () => server.db.get('SELECT COUNT(*) AS n FROM overrides WHERE cleared_at IS NULL AND (ends_at IS NULL OR ends_at > ?)', Date.now()).n;
+  const before = active();
+
+  for (const id of ['ov-all', 'ov-b', 'ov-style', 'ov-behind', slide.id, text.id]) {
+    assert.equal((await ed.del(`/api/media/${id}`)).status, 403, id);
+    const r = await ed.post('/api/library/bulk/delete', { ids: [id], inUseConfirmed: [id] });
+    assert.equal(r.data.results[0].reason, 'scope', id);
+  }
+  assert.equal((await ed.patch(`/api/media/${text.id}`, { title: 'Changed on every screen' })).status, 403);
+  assert.equal(active(), before, 'nothing was removed');
+
+  // An override on their own channel is theirs to affect, and one that's over no longer counts.
+  assert.equal((await ed.del('/api/media/ov-a')).status, 200);
+  assert.equal((await ed.del('/api/media/ov-ended')).status, 200);
+  assert.equal((await ed.del('/api/media/ov-cleared')).status, 200);
+  assert.equal((await admin.del('/api/media/ov-all')).status, 200, 'someone with every channel still can');
+});
+
+// ---------- deleting on Windows, where a file can stay busy ----------
+
+const POSIX_USER = process.platform !== 'win32' && process.getuid?.() !== 0;
+
+test('a folder that cannot be removed: the item still deletes with a warning, and the next start sweeps the folder', { skip: !POSIX_USER }, async (t) => {
+  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'signage-sweep-'));
+  atEnd(t, () => fs.rmSync(dataDir, { recursive: true, force: true }));
+  const boot = async () => {
+    const server = await createServer({ dataDir, port: 0, host: '127.0.0.1', ops: { fetch: null, discovery: false }, hashBackfillDelayMs: 1e8 });
+    const { port } = await server.start();
+    return { server, base: `http://127.0.0.1:${port}` };
+  };
+  const first = await boot();
+  const mediaDir = path.join(dataDir, 'media');
+  const admin = await setupAdmin(first.base);
+  const stuck = '11111111-2222-4333-8444-555555555555';
+  const keeper = '11111111-2222-4333-8444-666666666666';
+  seedImage(first.server, dataDir, stuck);
+  seedImage(first.server, dataDir, keeper);
+  fs.chmodSync(mediaDir, 0o555); // nothing directly inside can be removed now
+  atEnd(t, () => {
+    try { fs.chmodSync(mediaDir, 0o755); } catch {}
+  });
+  try {
+    const single = await admin.del(`/api/media/${stuck}`);
+    assert.equal(single.status, 200, JSON.stringify(single.data));
+  } finally {
+    fs.chmodSync(mediaDir, 0o755);
+  }
+  assert.equal(first.server.db.get('SELECT 1 AS x FROM media WHERE id = ?', stuck), undefined, 'the item is gone');
+  assert.equal(fs.existsSync(path.join(mediaDir, stuck)), true, 'the folder stayed behind');
+  await first.server.stop();
+
+  const second = await boot();
+  atEnd(t, () => second.server.stop());
+  assert.equal(fs.existsSync(path.join(mediaDir, stuck)), false, 'swept');
+  assert.equal(fs.existsSync(path.join(mediaDir, keeper, 'image.png')), true, 'an item with a row stays');
+});
+
+test('the sweep only removes folders that look like a UUID, have no row, and only when nothing is restoring', async (t) => {
+  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'signage-sweep-'));
+  atEnd(t, () => fs.rmSync(dataDir, { recursive: true, force: true }));
+  const mediaDir = path.join(dataDir, 'media');
+  const boot = async () => {
+    const server = await createServer({ dataDir, port: 0, host: '127.0.0.1', ops: { fetch: null, discovery: false }, hashBackfillDelayMs: 1e8 });
+    await server.start();
+    return server;
+  };
+  const orphan = 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee';
+  const others = ['branding', 'fx', 'not-a-uuid', 'BBBBBBBB-CCCC-4DDD-8EEE-FFFFFFFFFFFF', 'seeded'];
+  for (const name of [orphan, ...others]) {
+    fs.mkdirSync(path.join(mediaDir, name), { recursive: true });
+    fs.writeFileSync(path.join(mediaDir, name, 'keep.txt'), 'x');
+  }
+  const seed = openDb(path.join(dataDir, 'signage.db'));
+  seed.run("INSERT INTO media (id, type, name, created_at) VALUES ('seeded', 'text', 'x', 1)");
+  seed.close();
+
+  // A restore that gets stopped at startup: the boot that deals with it sweeps nothing.
+  const restoreDir = path.join(dataDir, '.restore');
+  fs.mkdirSync(restoreDir, { recursive: true });
+  fs.writeFileSync(path.join(restoreDir, 'restore.json'), JSON.stringify({ id: 'x', stagingName: 'upload-gone', firstRun: false, phase: 'pending' }));
+  let server = await boot();
+  await server.stop();
+  assert.equal(fs.existsSync(path.join(mediaDir, orphan, 'keep.txt')), true, 'a restore was in the picture, so nothing is swept');
+
+  // Now a normal start.
+  server = await boot();
+  await server.stop();
+  assert.equal(fs.existsSync(path.join(mediaDir, orphan)), false);
+  for (const name of others) assert.equal(fs.existsSync(path.join(mediaDir, name, 'keep.txt')), true, name);
+
+  // A plain file with a UUID's name is not a folder, so it's left alone too.
+  fs.writeFileSync(path.join(mediaDir, orphan), 'x');
+  server = await boot();
+  await server.stop();
+  assert.equal(fs.existsSync(path.join(mediaDir, orphan)), true);
+});
+
+test('a database with no library at all never empties the media folder, because that database may be the wrong one', async (t) => {
+  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'signage-sweep-'));
+  atEnd(t, () => fs.rmSync(dataDir, { recursive: true, force: true }));
+  const folder = path.join(dataDir, 'media', 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee');
+  fs.mkdirSync(folder, { recursive: true });
+  fs.writeFileSync(path.join(folder, 'image.png'), PNG);
+  const server = await createServer({ dataDir, port: 0, host: '127.0.0.1', ops: { fetch: null, discovery: false }, hashBackfillDelayMs: 1e8 });
+  await server.start();
+  await server.stop();
+  assert.equal(fs.existsSync(path.join(folder, 'image.png')), true);
+});
+
+// ---------- conversions keep going ----------
+
+test('a folder that cannot be removed after an item is deleted mid-conversion does not stop later conversions', { skip: !POSIX_USER }, async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'signage-drain-'));
+  atEnd(t, () => fs.rmSync(dir, { recursive: true, force: true }));
+  const mediaDir = path.join(dir, 'media');
+  fs.mkdirSync(mediaDir);
+  const flag = path.join(dir, 'hold');
+  fs.writeFileSync(flag, '');
+  const ffmpeg = path.join(dir, 'ffmpeg');
+  fs.writeFileSync(ffmpeg, `#!/bin/sh\nwhile [ -e "${flag}" ]; do sleep 0.02; done\nexit 1\n`);
+  fs.chmodSync(ffmpeg, 0o755);
+  const db = openDb(path.join(dir, 'signage.db'));
+  atEnd(t, () => db.close());
+  const add = (id) => {
+    fs.mkdirSync(path.join(mediaDir, id));
+    fs.writeFileSync(path.join(mediaDir, id, 'image.png'), PNG);
+    db.run("INSERT INTO media (id, type, name, status, file, created_at) VALUES (?, 'image', ?, 'processing', 'image.png', 1)", id, id);
+  };
+  add('first');
+  add('second');
+  const warnings = [];
+  const log = { error() {}, warn: (o, m) => warnings.push(m) };
+  const processor = createProcessor({ db, hub: { pushMedia() {}, adminRefresh() {} }, mediaDir, ffmpeg, log });
+  processor.enqueue('first');
+  processor.enqueue('second');
+  db.run("DELETE FROM media WHERE id = 'first'");
+  fs.chmodSync(mediaDir, 0o555);
+  atEnd(t, () => {
+    try { fs.chmodSync(mediaDir, 0o755); } catch {}
+  });
+  fs.rmSync(flag);
+  const end = Date.now() + 30000;
+  while (processor.busy() && Date.now() < end) await new Promise((r) => setTimeout(r, 20));
+  fs.chmodSync(mediaDir, 0o755);
+  assert.equal(processor.busy(), false, 'a stuck busy flag refuses every backup until a restart');
+  assert.equal(db.get("SELECT status FROM media WHERE id = 'second'").status, 'failed', 'the next item got its turn');
+  assert.ok(warnings.some((m) => /could not remove/i.test(m)), JSON.stringify(warnings));
 });

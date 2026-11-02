@@ -4,13 +4,13 @@ import fs from 'node:fs';
 import os from 'node:os';
 import net from 'node:net';
 import path from 'node:path';
-import { spawn } from 'node:child_process';
+import { execFile, spawn, spawnSync } from 'node:child_process';
 import { createServer } from '../server/index.js';
 import { openDb } from '../server/db.js';
 import { createLiveFeeds } from '../server/live/supervisor.js';
 import { probeCapabilities } from '../server/live/probe.js';
-import { commandLineOf, createPidFiles, isOurFfmpeg } from '../server/live/orphans.js';
-import { client, setupAdmin } from './helpers.js';
+import { LOOKUP_MS, commandLineOf, createPidFiles, isOurFfmpeg } from '../server/live/orphans.js';
+import { atEnd, client, setupAdmin } from './helpers.js';
 
 const POSIX = process.platform !== 'win32';
 const ROOT = path.join(import.meta.dirname, '..');
@@ -28,7 +28,7 @@ async function waitFor(what, check, ms = 20000) {
 
 function tempDir(t) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'signage-supervise-'));
-  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  atEnd(t, () => fs.rmSync(dir, { recursive: true, force: true }));
   return dir;
 }
 
@@ -54,7 +54,7 @@ const alive = (pid) => {
 
 // Stops only what this test started, by its own PID.
 function stopLater(t, pid) {
-  t.after(() => {
+  atEnd(t, () => {
     try { process.kill(pid, 'SIGKILL'); } catch {}
   });
 }
@@ -88,7 +88,7 @@ function supervisor(t, ffmpeg) {
   db.run("INSERT INTO media (id, type, name, url, created_at) VALUES ('f1', 'hls', 'Feed', '/live/f1/index.m3u8', 1)");
   db.run("INSERT INTO live_feeds (media_id, input, port) VALUES ('f1', 'rtmp', 52001)");
   const live = createLiveFeeds({ db, hub: { pushMedia() {}, adminRefresh() {} }, dataDir, ffmpeg: ffmpeg.path });
-  t.after(async () => {
+  atEnd(t, async () => {
     await live.stop();
     db.close();
   });
@@ -106,7 +106,7 @@ test('a saved device name with a NUL cannot stop the server booting', async (t) 
 
   const server = await createServer({ dataDir, port: 0, host: '127.0.0.1' });
   const { port } = await server.start();
-  t.after(() => server.stop());
+  atEnd(t, () => server.stop());
   const failed = await waitFor('the feed to report the problem', () => (server.live.statusOf('bad') === 'error' ? server.live.describe('bad') : null));
   assert.match(failed.message, /choose the device again/i);
   assert.equal((await fetch(`http://127.0.0.1:${port}/tv`)).status, 200, 'the server is still up');
@@ -116,7 +116,7 @@ test('capture device names with control characters are refused, and a bad saved 
   const dataDir = tempDir(t);
   const server = await createServer({ dataDir, port: 0, host: '127.0.0.1' });
   const { port } = await server.start();
-  t.after(() => server.stop());
+  atEnd(t, () => server.stop());
   const admin = await setupAdmin(`http://127.0.0.1:${port}`);
 
   for (const body of [{ device: 'Cam\u0000era' }, { device: 'Cam\nera' }, { device: 'Cam', audioDevice: 'Mic\u0007' }, { device: 'Cam\u007f' }]) {
@@ -140,7 +140,7 @@ test('a filesystem error while starting a feed is an error status and a retry, n
   fs.mkdirSync(dir);
   fs.writeFileSync(path.join(dir, 'seg-1.ts'), 'old');
   fs.chmodSync(dir, 0o555); // the old segments can't be removed
-  t.after(() => {
+  atEnd(t, () => {
     try { fs.chmodSync(dir, 0o755); } catch {}
   });
 
@@ -295,13 +295,152 @@ test('a recorded PID that is not our ffmpeg is left alone, and corrupt files nev
   assert.deepEqual(fs.readdirSync(dir), [], 'the files are gone either way');
 });
 
-test('a real ffmpeg orphaned by SIGKILL is cleared at the next start, so the port works again', { skip: !POSIX }, async (t) => {
+test('a lookup that fails keeps the record, and later runs of that feed do not lose it, so the next start can still clear it', { skip: !POSIX }, async (t) => {
+  const dir = tempDir(t);
+  const script = path.join(dir, 'ffmpeg');
+  fs.writeFileSync(script, '#!/bin/sh\nwhile :; do sleep 1; done\n');
+  fs.chmodSync(script, 0o755);
+  const target = 'rtmp://0.0.0.0:52998/live/feed';
+  const leftover = spawn(script, ['-i', target, 'index.m3u8'], { stdio: 'ignore', detached: true });
+  stopLater(t, leftover.pid);
+
+  const pidDir = path.join(dir, 'pids');
+  const unknown = createPidFiles(pidDir, { lookup: async () => null });
+  unknown.write('feed', leftover.pid, script, target);
+  await unknown.reapAll();
+  assert.equal(alive(leftover.pid), true, 'not checked, so not touched');
+  assert.equal(fs.readdirSync(pidDir).length, 1, 'the record is still there');
+
+  // The feed comes back up and writes and removes its own record, as it does on every run.
+  unknown.write('feed', 999999, script, target);
+  unknown.remove('feed');
+  assert.equal(fs.readdirSync(pidDir).length, 1, 'that must not take the old record with it');
+
+  await createPidFiles(pidDir).reapAll();
+  await waitFor('the leftover to be stopped', () => leftover.exitCode !== null || leftover.signalCode !== null);
+  assert.deepEqual(fs.readdirSync(pidDir), [], 'cleared and forgotten');
+});
+
+test('a record whose process has gone is forgotten without asking anything', { skip: !POSIX }, async (t) => {
+  const dir = tempDir(t);
+  const gone = spawn('sleep', ['0'], { stdio: 'ignore' });
+  await new Promise((r) => gone.once('exit', r));
+  let lookups = 0;
+  const pids = createPidFiles(dir, { lookup: async () => { lookups += 1; return null; } });
+  pids.write('feed', gone.pid, '/x/ffmpeg', 'y');
+  await pids.reapAll();
+  assert.equal(lookups, 0);
+  assert.deepEqual(fs.readdirSync(dir), []);
+});
+
+test('the lookup gets a long enough limit, and stopping the server does not wait it out', { skip: !POSIX }, async (t) => {
+  assert.equal(LOOKUP_MS, 15000);
+  const dir = tempDir(t);
+  const sleeper = spawn('sleep', ['30'], { stdio: 'ignore' });
+  stopLater(t, sleeper.pid);
+  let seenSignal = null;
+  const pids = createPidFiles(dir, {
+    lookup: (pid, { signal }) => new Promise((resolve) => {
+      seenSignal = signal;
+      signal.addEventListener('abort', () => resolve(null));
+    }),
+  });
+  pids.write('feed', sleeper.pid, '/x/ffmpeg', 'y');
+  const reaping = pids.reapAll();
+  await waitFor('the lookup to start', () => seenSignal);
+  pids.cancel();
+  await reaping;
+  assert.equal(fs.readdirSync(dir).length, 1, 'still unknown, so the record stays for the next start');
+});
+
+test('live.start() does not wait for the lookup: the server is up while it runs', { skip: !POSIX }, async (t) => {
+  const { live, dataDir } = supervisor(t, fakeFfmpeg(t, { feed: 'exec sleep 30' }));
+  const sleeper = spawn('sleep', ['30'], { stdio: 'ignore' });
+  stopLater(t, sleeper.pid);
+  createPidFiles(path.join(dataDir, 'live-pids')).write('another', sleeper.pid, '/x/ffmpeg', 'y');
+  const result = live.start();
+  assert.equal(result, undefined, 'it returns no promise for anything to wait on');
+});
+
+test('a record is never half written: a reader sees all of it or none of it', { skip: !POSIX }, (t) => {
+  const dir = tempDir(t);
+  const pids = createPidFiles(dir);
+  const seen = new Set();
+  for (let i = 0; i < 200; i++) {
+    pids.write('feed', 1000 + i, '/x/ffmpeg', `rtmp://0.0.0.0:${i}/live/feed`);
+    for (const name of fs.readdirSync(dir)) seen.add(name);
+    assert.equal(JSON.parse(fs.readFileSync(path.join(dir, 'feed.pid'), 'utf8')).pid, 1000 + i);
+  }
+  assert.deepEqual([...seen], ['feed.pid'], 'no temporary file is left to be read as a record');
+});
+
+// Who's listening on a port, asked of the system. The test must not try the port itself: binding it
+// even for a moment can make ffmpeg's own bind fail, and that ffmpeg exits and gets replaced under a
+// new PID. Connecting would look like a sender, and make ffmpeg exit too.
+function listenerOn(port) {
+  return new Promise((resolve) => {
+    execFile('lsof', ['-nP', `-iTCP:${port}`, '-sTCP:LISTEN', '-t'], (err, stdout) => {
+      resolve(err ? null : Number(String(stdout).trim().split('\n')[0]) || null);
+    });
+  });
+}
+const HAS_LSOF = spawnSync('lsof', ['-v'], { stdio: 'ignore' }).error === undefined;
+
+// A pid file is read whole or not at all, by whichever side, and is gone once a feed stops.
+function readPidFile(file) {
+  try {
+    return JSON.parse(fs.readFileSync(file, 'utf8'));
+  } catch {
+    return null;
+  }
+}
+
+// However a test using a real ffmpeg ends, its processes go with it. A real ffmpeg listening on a
+// port never exits by itself, and SIGKILL on its parent is exactly what doesn't take it along. So
+// this remembers every PID the pid file ever named, and stops them by PID in the end, each only if
+// its command line still shows it's that ffmpeg.
+function cleanUpFeedProcesses(t, pidFile, cli) {
+  const seen = new Map();
+  const note = () => {
+    const record = readPidFile(pidFile);
+    if (record?.pid) seen.set(record.pid, record);
+  };
+  const watcher = setInterval(note, 20);
+  atEnd(t, async () => {
+    clearInterval(watcher);
+    note();
+    // A clean stop takes ffmpeg with it. If that isn't quick, it's forced, and the rest is below.
+    if (cli.exitCode === null && cli.signalCode === null) {
+      const gone = new Promise((resolve) => cli.once('exit', resolve));
+      cli.kill('SIGTERM');
+      await Promise.race([gone, sleep(8000)]);
+      try { cli.kill('SIGKILL'); } catch {}
+      note();
+    }
+    for (const [pid, record] of seen) {
+      if (!alive(pid)) continue;
+      if (isOurFfmpeg(await commandLineOf(pid), record)) {
+        try { process.kill(pid, 'SIGKILL'); } catch {}
+      }
+    }
+  });
+  return { watcher, note, seen };
+}
+
+test('a real ffmpeg orphaned by SIGKILL is cleared at the next start, so the port works again', { skip: !POSIX || !HAS_LSOF }, async (t) => {
+  // Long, as a net only: under load a real ffmpeg takes as long as it takes, and nothing here relies on how long.
+  const PATIENCE = 120000;
   const dataDir = tempDir(t);
   const feedPort = await freePort();
   const first = await createServer({ dataDir, port: 0, host: '127.0.0.1' });
   const { port: firstPort } = await first.start();
+  let firstStopped = false;
+  atEnd(t, async () => {
+    if (!firstStopped) await first.stop();
+  });
   const firstAdmin = await setupAdmin(`http://127.0.0.1:${firstPort}`);
   const feed = (await firstAdmin.post('/api/live-feeds', { name: 'Program', input: 'rtmp', port: feedPort, enabled: false })).data;
+  firstStopped = true;
   await first.stop();
   const seed = openDb(path.join(dataDir, 'signage.db'));
   seed.run('UPDATE live_feeds SET enabled = 1 WHERE media_id = ?', feed.id);
@@ -313,37 +452,34 @@ test('a real ffmpeg orphaned by SIGKILL is cleared at the next start, so the por
     env: { ...process.env, PORT: String(await freePort()), SIGNAGE_HOST: '127.0.0.1', SIGNAGE_DATA_DIR: dataDir, SIGNAGE_NO_AUTOSTART: '1' },
     stdio: 'ignore',
   });
-  stopLater(t, cli.pid);
-  const pidFile = path.join(dataDir, 'live-pids', `${feed.id}.pid`);
-  const { pid: orphan } = await waitFor('the pid file', () => (fs.existsSync(pidFile) ? JSON.parse(fs.readFileSync(pidFile, 'utf8')) : null));
-  stopLater(t, orphan);
-  // By trying to bind: connecting would look like a sender, and make ffmpeg exit.
-  await waitFor('ffmpeg to hold the port', () => new Promise((resolve) => {
-    const s = net.createServer();
-    s.once('error', () => resolve(true));
-    s.listen(feedPort, '0.0.0.0', () => s.close(() => resolve(false)));
-  }));
   const closed = new Promise((resolve) => cli.once('exit', resolve));
+  const pidFile = path.join(dataDir, 'live-pids', `${feed.id}.pid`);
+  const tracked = cleanUpFeedProcesses(t, pidFile, cli);
+
+  // Whichever ffmpeg holds the port is the one to orphan. A retry would change the PID.
+  const orphan = await waitFor('ffmpeg to hold the port', async () => {
+    const holder = await listenerOn(feedPort);
+    return holder && holder === readPidFile(pidFile)?.pid ? holder : null;
+  }, PATIENCE);
   cli.kill('SIGKILL');
   await closed;
-  await sleep(200);
   assert.equal(alive(orphan), true, 'the orphan survives its parent, which is the problem being fixed');
+  assert.equal(await listenerOn(feedPort), orphan, 'and it still holds the port');
 
   const second = await createServer({ dataDir, port: 0, host: '127.0.0.1' });
   const { port } = await second.start();
   let secondStopped = false;
-  t.after(async () => {
+  atEnd(t, async () => {
     if (!secondStopped) await second.stop();
   });
-  await waitFor('the orphan to be stopped', () => !alive(orphan));
-  const [replacement] = await waitFor('a new ffmpeg', () => {
-    const pids = second.live.childPids();
-    return pids.length === 1 ? pids : null;
-  });
+  await waitFor('the orphan to be stopped', () => !alive(orphan), PATIENCE);
+  const replacement = await waitFor('a new ffmpeg to hold the port', async () => {
+    const holder = await listenerOn(feedPort);
+    return holder && second.live.childPids().includes(holder) ? holder : null;
+  }, PATIENCE);
   assert.notEqual(replacement, orphan);
-  stopLater(t, replacement);
-  assert.equal(JSON.parse(fs.readFileSync(pidFile, 'utf8')).pid, replacement, 'the file follows the new process');
-  await sleep(1500);
+  tracked.note();
+  assert.equal(readPidFile(pidFile)?.pid, replacement, 'the file follows the new process');
   assert.equal(second.live.statusOf(feed.id), 'idle', 'no "port in use" error');
   const after = client(`http://127.0.0.1:${port}`);
   await after.post('/api/login', { username: 'ada', password: 'correct horse' });
@@ -351,7 +487,8 @@ test('a real ffmpeg orphaned by SIGKILL is cleared at the next start, so the por
 
   secondStopped = true;
   await second.stop();
-  assert.equal(fs.existsSync(pidFile), false, 'a clean stop leaves no file');
+  assert.equal(alive(replacement), false, 'a clean stop takes ffmpeg with it');
+  assert.equal(fs.existsSync(pidFile), false, 'and leaves no file');
 });
 
 test('a feed deleted while the server was down still gets its orphan cleared', { skip: !POSIX }, async (t) => {
@@ -386,7 +523,7 @@ test('SIGHUP shuts the command-line server down cleanly, with no ffmpeg left beh
   });
   stopLater(t, cli.pid);
   const pidFile = path.join(dataDir, 'live-pids', 'f1.pid');
-  const { pid } = await waitFor('the pid file', () => (fs.existsSync(pidFile) ? JSON.parse(fs.readFileSync(pidFile, 'utf8')) : null));
+  const { pid } = await waitFor('the pid file', () => readPidFile(pidFile));
   stopLater(t, pid);
   const exited = new Promise((resolve) => cli.once('exit', (code, signal) => resolve({ code, signal })));
   cli.kill('SIGHUP');

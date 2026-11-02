@@ -3,8 +3,34 @@ import path from 'node:path';
 import { createHash } from 'node:crypto';
 import { canEditMedia, mediaInScope } from './auth.js';
 import { hasPermission } from './permissions.js';
+import { UnsafePathError, childPath, mediaFolder } from './safe-path.js';
 
 const ids = (mediaIds) => JSON.stringify(mediaIds);
+const RM_WITH_RETRIES = { recursive: true, force: true, maxRetries: 5, retryDelay: 200 };
+const ITEM_FOLDER = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
+// Removes folders left by a delete that couldn't finish, or an upload a crash cut short. It only
+// touches names this app gives its own items, so `branding` and anything someone else put there are
+// safe. Run it before the server accepts uploads, as an upload's folder comes before its row. With
+// no library at all it does nothing: that database could be the wrong one, or a new one someone is
+// about to restore over, and the folders could be all that's left of a library.
+export async function sweepOrphanFolders({ db, mediaDir, log }) {
+  try {
+    if (!db.get('SELECT 1 AS x FROM media LIMIT 1')) return;
+    const known = new Set(db.all('SELECT id FROM media').map((m) => m.id));
+    const folders = fs.readdirSync(mediaDir, { withFileTypes: true })
+      .filter((e) => e.isDirectory() && ITEM_FOLDER.test(e.name) && !known.has(e.name));
+    for (const { name } of folders) {
+      try {
+        await fs.promises.rm(path.join(mediaDir, name), RM_WITH_RETRIES);
+      } catch (err) {
+        log?.warn?.({ err, folder: name }, 'Could not remove a leftover library folder. Will try again at the next start.');
+      }
+    }
+  } catch (err) {
+    log?.warn?.({ err }, 'Could not check the library for leftover folders');
+  }
+}
 
 // What is using each library item right now. This is the one place that decides whether an item is
 // in use: the library, delete warnings, and the cleanup view all read `inUse` from here. Anything new
@@ -77,13 +103,19 @@ export function deleteBlock(db, live, user, m) {
 }
 
 // Deletes one item and its files. The caller tells the TVs and admin screens afterwards.
-export async function removeMedia({ db, live, mediaDir }, m) {
+// The item is gone once its row is. A folder that can't be removed, as Windows does when something
+// has a file open, is only a warning, and the next start's sweep takes care of it.
+export async function removeMedia({ db, live, mediaDir, log }, m) {
   const channels = db.all('SELECT DISTINCT channel_id FROM playlist_items WHERE media_id = ?', m.id).map((c) => c.channel_id);
   // Any text slide or override might use a deleted picture as its background, so images update every channel.
   const wasOverride = m.type === 'image' || !!db.get('SELECT 1 AS x FROM overrides WHERE media_id = ? AND cleared_at IS NULL', m.id);
   await live.remove(m.id);
   db.run('DELETE FROM media WHERE id = ?', m.id);
-  await fs.promises.rm(path.join(mediaDir, m.id), { recursive: true, force: true });
+  try {
+    await fs.promises.rm(mediaFolder(mediaDir, m.id), RM_WITH_RETRIES);
+  } catch (err) {
+    log?.warn?.({ err, id: m.id }, 'Could not remove a deleted item\'s folder. Will try again at the next start.');
+  }
   return { channels, wasOverride };
 }
 
@@ -98,6 +130,15 @@ export function findDuplicate(db, sha256, exceptId) {
 }
 
 // The space deleting an item would free, which includes its thumbnail.
+export async function itemSize(mediaDir, id) {
+  try {
+    return await folderSize(mediaFolder(mediaDir, id));
+  } catch (err) {
+    if (err instanceof UnsafePathError) return 0;
+    throw err;
+  }
+}
+
 export async function folderSize(dir) {
   let total = 0;
   let names;
@@ -158,7 +199,7 @@ export function createHashBackfill({ db, mediaDir, isBusy = () => false, log, st
       while (isBusy() && !stopped) await sleep(busyPollMs);
       if (stopped) break;
       try {
-        const sha256 = await hashFile(path.join(mediaDir, m.id, m.file));
+        const sha256 = await hashFile(childPath(mediaFolder(mediaDir, m.id), m.file));
         if (!sha256) break;
         // The item may have been deleted while this ran.
         db.run('UPDATE media SET sha256 = ? WHERE id = ? AND sha256 IS NULL AND file = ?', sha256, m.id, m.file);
