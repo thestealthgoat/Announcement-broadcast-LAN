@@ -1,0 +1,155 @@
+import { spawn } from 'node:child_process';
+import fs from 'node:fs';
+import path from 'node:path';
+import { createRequire } from 'node:module';
+
+const require = createRequire(import.meta.url);
+
+export function resolveFfmpeg() {
+  if (process.env.SIGNAGE_FFMPEG) return process.env.SIGNAGE_FFMPEG;
+  if (process.resourcesPath) {
+    const packaged = path.join(process.resourcesPath, 'ffmpeg', process.platform === 'win32' ? 'ffmpeg.exe' : 'ffmpeg');
+    if (fs.existsSync(packaged)) return packaged;
+  }
+  try {
+    const p = require('ffmpeg-static');
+    if (p && fs.existsSync(p)) return p;
+  } catch {}
+  return 'ffmpeg';
+}
+
+// Returns null when the first bytes are not an allowed image format.
+export function sniffImage(buf) {
+  if (buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff) return 'jpg';
+  if (buf.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))) return 'png';
+  if (buf.toString('latin1', 0, 6) === 'GIF87a' || buf.toString('latin1', 0, 6) === 'GIF89a') return 'gif';
+  if (buf.toString('latin1', 0, 4) === 'RIFF' && buf.toString('latin1', 8, 12) === 'WEBP') return 'webp';
+  return null;
+}
+
+function parseTime(h, m, s) {
+  return Number(h) * 3600 + Number(m) * 60 + Number(s);
+}
+
+export function createProcessor({ db, hub, mediaDir, ffmpeg = resolveFfmpeg(), log }) {
+  const queue = [];
+  let running = false;
+  let currentChild = null;
+  let stopped = false;
+
+  function runFfmpeg(args, onStderr) {
+    return new Promise((resolve, reject) => {
+      const child = spawn(ffmpeg, ['-hide_banner', '-nostdin', '-y', ...args], {
+        stdio: ['ignore', 'ignore', 'pipe'],
+        windowsHide: true,
+      });
+      currentChild = child;
+      let tail = '';
+      child.stderr.on('data', (d) => {
+        const text = d.toString();
+        tail = (tail + text).slice(-2000);
+        onStderr?.(text);
+      });
+      child.on('error', reject);
+      child.on('close', (code) => {
+        currentChild = null;
+        if (code === 0) resolve();
+        else reject(new Error(tail.trim().split('\n').pop() || `ffmpeg exited with ${code}`));
+      });
+    });
+  }
+
+  async function processVideo(media, dir) {
+    const source = path.join(dir, media.file);
+    const output = path.join(dir, 'video.mp4');
+    let total = 0;
+    let lastPct = -1;
+    await runFfmpeg(
+      [
+        '-i', source,
+        '-map', '0:v:0', '-map', '0:a:0?',
+        '-c:v', 'libx264', '-profile:v', 'high', '-level', '4.2', '-pix_fmt', 'yuv420p',
+        '-preset', 'veryfast', '-crf', '23', '-maxrate', '8M', '-bufsize', '16M',
+        '-vf', 'scale=1920:1080:force_original_aspect_ratio=decrease:force_divisible_by=2',
+        '-fpsmax', '60',
+        '-c:a', 'aac', '-b:a', '160k', '-ac', '2', '-ar', '48000',
+        '-movflags', '+faststart',
+        output,
+      ],
+      (text) => {
+        const d = text.match(/Duration: (\d+):(\d+):([\d.]+)/);
+        if (d && !total) total = parseTime(d[1], d[2], d[3]);
+        const t = text.match(/time=(\d+):(\d+):([\d.]+)/);
+        if (t && total) {
+          const pct = Math.min(99, Math.floor((parseTime(t[1], t[2], t[3]) / total) * 100));
+          if (pct !== lastPct) {
+            lastPct = pct;
+            db.run('UPDATE media SET progress = ? WHERE id = ?', pct, media.id);
+            hub.adminRefresh('media');
+          }
+        }
+      },
+    );
+    await runFfmpeg([
+      '-ss', String(Math.min(1, total / 2)), '-i', output,
+      '-frames:v', '1', '-vf', 'scale=480:-2', '-q:v', '4', path.join(dir, 'thumb.jpg'),
+    ]);
+    const size = fs.statSync(output).size;
+    if (media.file !== 'video.mp4') fs.rmSync(source, { force: true });
+    db.run(
+      `UPDATE media SET status = 'ready', progress = NULL, file = 'video.mp4', thumb = 'thumb.jpg',
+       duration = ?, size = ?, rev = rev + 1 WHERE id = ?`,
+      total || null, size, media.id,
+    );
+  }
+
+  async function processImage(media, dir) {
+    await runFfmpeg([
+      '-i', path.join(dir, media.file),
+      '-frames:v', '1', '-vf', "scale='min(480,iw)':-2", '-q:v', '4', path.join(dir, 'thumb.jpg'),
+    ]);
+    db.run("UPDATE media SET status = 'ready', thumb = 'thumb.jpg', rev = rev + 1 WHERE id = ?", media.id);
+  }
+
+  async function drain() {
+    if (running) return;
+    running = true;
+    while (queue.length && !stopped) {
+      const id = queue.shift();
+      const media = db.get('SELECT * FROM media WHERE id = ?', id);
+      if (!media) continue;
+      const dir = path.join(mediaDir, id);
+      try {
+        if (media.type === 'video') await processVideo(media, dir);
+        else await processImage(media, dir);
+      } catch (err) {
+        if (stopped) break;
+        log.error({ err, id }, 'media processing failed');
+        const friendly = media.type === 'video' ? 'Could not convert this video.' : 'This does not look like a valid image.';
+        db.run("UPDATE media SET status = 'failed', progress = NULL, error = ? WHERE id = ?", friendly, id);
+      }
+      if (db.get('SELECT 1 AS x FROM media WHERE id = ?', id)) hub.pushMedia(id);
+      else fs.rmSync(dir, { recursive: true, force: true }); // deleted while converting
+      hub.adminRefresh('media');
+    }
+    running = false;
+  }
+
+  return {
+    enqueue(id) {
+      queue.push(id);
+      drain().catch((err) => log.error(err));
+    },
+    // Picks up work that a shutdown interrupted.
+    resume() {
+      for (const m of db.all("SELECT * FROM media WHERE status = 'processing'")) {
+        if (m.file && fs.existsSync(path.join(mediaDir, m.id, m.file))) this.enqueue(m.id);
+        else db.run("UPDATE media SET status = 'failed', error = 'The upload was interrupted. Please upload it again.' WHERE id = ?", m.id);
+      }
+    },
+    stop() {
+      stopped = true;
+      currentChild?.kill();
+    },
+  };
+}

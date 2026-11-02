@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Network Signage</title>
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; img-src http://localhost:*">
+<style>
+  :root { color-scheme: light dark; --bg: #f3f4f6; --card: #fff; --text: #111827; --muted: #6b7280; --border: #e5e7eb; }
+  @media (prefers-color-scheme: dark) { :root { --bg: #0b0f17; --card: #151b26; --text: #e5e7eb; --muted: #9ca3af; --border: #2a3342; } }
+  body { margin: 0; padding: 20px; background: var(--bg); color: var(--text); font: 15px/1.45 -apple-system, "Segoe UI", Roboto, sans-serif; text-align: center; }
+  h1 { font-size: 1.2rem; margin: 0 0 2px; }
+  p { margin: 0 0 12px; color: var(--muted); font-size: .9rem; }
+  img { width: 190px; height: 190px; background: #fff; padding: 8px; border-radius: 12px; box-sizing: border-box; }
+  .box { background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 10px 12px; margin-top: 12px; text-align: left; }
+  .label { font-size: .75rem; font-weight: 600; color: var(--muted); }
+  .url { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: .85rem; overflow-wrap: anywhere; user-select: text; }
+  a.btn { display: block; margin-top: 14px; padding: 11px; border-radius: 10px; background: #2563eb; color: #fff; font-weight: 600; text-decoration: none; }
+</style>
+</head>
+<body>
+  <h1>Network Signage is running</h1>
+  <p>Scan with your phone to open the admin.</p>
+  <img id="qr" alt="QR code for the admin page">
+  <div class="box"><div class="label">Admin</div><div class="url" id="admin"></div></div>
+  <div class="box"><div class="label">Open this on each TV</div><div class="url" id="tv"></div></div>
+  <a class="btn" id="open" target="_blank" rel="noreferrer">Open admin</a>
+  <p style="margin-top:12px">Closing this window keeps signage running in the tray.</p>
+<script>
+  var q = new URLSearchParams(location.search);
+  var base = q.get('base');
+  document.getElementById('admin').textContent = base + '/admin/';
+  document.getElementById('tv').textContent = base + '/tv';
+  document.getElementById('open').href = base + '/admin/';
+  document.getElementById('qr').src = q.get('local') + '/api/qr.svg?path=/admin/';
+</script>
+</body>
+</html>

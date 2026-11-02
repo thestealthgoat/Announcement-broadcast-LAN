@@ -1,0 +1,103 @@
+{
+  "name": "network-signage",
+  "productName": "Network Signage",
+  "version": "1.0.0",
+  "description": "Open-source, self-hosted digital signage for your local network.",
+  "license": "MIT",
+  "type": "module",
+  "main": "electron/main.js",
+  "scripts": {
+    "start": "node server/cli.js",
+    "dev": "node --watch server/cli.js",
+    "test": "node --test test/",
+    "tray": "electron .",
+    "icons": "node scripts/make-icons.mjs",
+    "dist:mac": "node scripts/prep-ffmpeg.mjs darwin arm64 && node scripts/prep-ffmpeg.mjs darwin x64 && electron-builder --mac dmg --arm64 --x64",
+    "dist:win": "node scripts/prep-ffmpeg.mjs win32 x64 && electron-builder --win nsis --x64"
+  },
+  "dependencies": {
+    "@fastify/cookie": "^11.1.5",
+    "@fastify/multipart": "^10.1.6",
+    "@fastify/static": "^10.1.8",
+    "@fastify/websocket": "^11.3.6",
+    "fastify": "^5.12.7",
+    "ffmpeg-static": "^5.3.0",
+    "hls.js": "^1.7.4",
+    "pdfjs-dist": "^6.5.438",
+    "qrcode": "^1.5.4",
+    "sortablejs": "^1.15.7"
+  },
+  "devDependencies": {
+    "acorn": "^8.19.0",
+    "electron": "^45.2.1",
+    "electron-builder": "^26.18.0"
+  },
+  "author": "Network Signage contributors",
+  "homepage": "https://github.com/thestealthgoat/Announcement-broadcast-LAN",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/thestealthgoat/Announcement-broadcast-LAN.git"
+  },
+  "build": {
+    "appId": "org.networksignage.app",
+    "productName": "Network Signage",
+    "asar": false,
+    "directories": {
+      "output": "dist",
+      "buildResources": "build"
+    },
+    "files": [
+      "server/**",
+      "public/**",
+      "electron/**",
+      "package.json",
+      "LICENSE",
+      "!**/*.map",
+      "!node_modules/ffmpeg-static/**",
+      "!node_modules/pdfjs-dist/{types,web,image_decoders,wasm,iccs,standard_fonts,cmaps}/**",
+      "!node_modules/pdfjs-dist/build/**",
+      "!node_modules/@napi-rs/**"
+    ],
+    "artifactName": "Network-Signage-${version}-${os}-${arch}.${ext}",
+    "mac": {
+      "target": [
+        "dmg"
+      ],
+      "category": "public.app-category.utilities",
+      "icon": "build/icon.png",
+      "identity": null,
+      "extendInfo": {
+        "LSUIElement": true
+      },
+      "extraResources": [
+        {
+          "from": "bin/darwin-${arch}",
+          "to": "ffmpeg"
+        }
+      ]
+    },
+    "dmg": {
+      "writeUpdateInfo": false
+    },
+    "win": {
+      "target": [
+        "nsis"
+      ],
+      "icon": "build/icon.png",
+      "extraResources": [
+        {
+          "from": "bin/win32-${arch}",
+          "to": "ffmpeg"
+        }
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "differentialPackage": false
+    },
+    "publish": null
+  }
+}
