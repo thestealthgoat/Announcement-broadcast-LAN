@@ -135,7 +135,7 @@ test('a PDF becomes one slide per page; videos default to full length', () => {
 test('pages load: admin, player, service worker, vendored libraries', async (t) => {
   const { base } = await startServer(t);
   assert.equal((await fetch(`${base}/`, { redirect: 'manual' })).headers.get('location'), '/admin/');
-  for (const url of ['/admin/', '/tv', '/play/anything', '/sw.js', '/player/player.js', '/player/schedule.js', '/vendor/hls.min.js', '/vendor/sortable.min.js', '/vendor/pdf.min.mjs', '/vendor/pdf.worker.min.mjs']) {
+  for (const url of ['/admin/', '/tv', '/play/anything', '/sw.js', '/player/player.js', '/player/schedule.js', '/player/transitions.js', '/vendor/hls.min.js', '/vendor/sortable.min.js', '/vendor/pdf.min.mjs', '/vendor/pdf.worker.min.mjs']) {
     const r = await fetch(base + url);
     assert.equal(r.status, 200, url);
     await r.arrayBuffer();
@@ -144,7 +144,7 @@ test('pages load: admin, player, service worker, vendored libraries', async (t) 
 });
 
 test('player code stays ES5 so old TV browsers can parse it', () => {
-  for (const name of ['player.js', 'schedule.js']) {
+  for (const name of ['player.js', 'schedule.js', 'transitions.js']) {
     const file = path.join(import.meta.dirname, '..', 'public', 'player', name);
     acorn.parse(fs.readFileSync(file, 'utf8'), { ecmaVersion: 5 });
   }

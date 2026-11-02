@@ -1,4 +1,5 @@
 import { h, api, guard, field, checkbox, toast, openDialog, thumb, TYPE_LABEL } from '../lib.js';
+import { transitionSettings } from './transitionSettings.js';
 
 export async function channelsView(main, ctx) {
   const listEl = h('div', { class: 'list' });
@@ -184,12 +185,9 @@ export async function channelView(main, ctx, id) {
       placeholder: isVideo ? 'Full length' : item.media.type === 'hls' ? '60' : '10',
       onchange: (e) => save(item.id, { duration: e.target.value === '' ? null : Number(e.target.value) }),
     });
-    const transition = h('select', { onchange: (e) => save(item.id, { transition: e.target.value }) },
-      ['cut', 'fade', 'slide'].map((t) => h('option', { value: t, selected: item.transition === t }, t[0].toUpperCase() + t.slice(1))));
     return h('div', { class: 'pl-settings' },
       h('div', { class: 'row', style: 'margin-top:8px' },
         field(item.media.type === 'pdf' ? 'Seconds per page' : 'Seconds on screen', duration),
-        field('Transition', transition),
       ),
       h('div', { style: 'margin-top:8px' },
         (isVideo || item.media.type === 'hls') && checkbox('Play sound', {
@@ -201,6 +199,17 @@ export async function channelView(main, ctx, id) {
           onchange: (e) => save(item.id, { enabled: e.target.checked }),
         }),
       ),
+      transitionSettings({
+        legend: 'Transition into this item',
+        style: item.transitionStyle,
+        speed: item.transitionSpeed,
+        inherited: item.inheritedTransition,
+        save: async (patch) => {
+          const updated = await save(item.id, { transitionStyle: patch.style, transitionSpeed: patch.speed });
+          if (updated) Object.assign(item, updated);
+          return !!updated;
+        },
+      }),
       scheduleSection(item),
       h('button', {
         class: 'ghost danger-text',
@@ -246,6 +255,10 @@ export async function channelView(main, ctx, id) {
     if (dragging || listEl.contains(document.activeElement) && document.activeElement.tagName !== 'BUTTON') return;
     items = await api.get(`/api/channels/${id}/items`);
     render();
+    if (channelDefaults) {
+      const fresh = (await api.get('/api/channels')).find((c) => c.id === id);
+      if (fresh) channelDefaults.show(fresh.defaultTransitionStyle, fresh.defaultTransitionSpeed);
+    }
   }
 
   // Statuses change with the clock, not just when someone edits something. Only the
@@ -280,6 +293,18 @@ export async function channelView(main, ctx, id) {
       return [body, h('div', { class: 'dialog-foot' }, h('button', { onclick: close }, 'Done'))];
     });
   }
+
+  const channelDefaults = channel.canEdit && transitionSettings({
+    legend: 'Default transition',
+    intro: 'Items on this channel use this unless they have their own transition. Items added later use it too, and changing it here changes them all.',
+    style: channel.defaultTransitionStyle,
+    speed: channel.defaultTransitionSpeed,
+    save: async (patch) => {
+      const updated = await guard(() => api.patch(`/api/channels/${id}`, { defaultTransitionStyle: patch.style, defaultTransitionSpeed: patch.speed }));
+      if (updated) await guard(refresh);
+      return !!updated;
+    },
+  });
 
   const frame = h('iframe', { src: `/play/${channel.slug}?preview=1`, title: `Live preview of ${channel.name}` });
   const previewBox = h('div', { class: 'preview' }, frame);
@@ -318,6 +343,7 @@ export async function channelView(main, ctx, id) {
       previewBox,
       h('p', { class: 'muted small', style: 'margin:.6rem 0 0' }, 'TV address: ', h('span', { class: 'code' }, tvUrl)),
     ),
+    channelDefaults && h('section', { class: 'card' }, channelDefaults),
     h('div', { class: 'actions' },
       channel.canAdd && h('button', { class: 'primary', onclick: addFromLibrary }, 'Add from library'),
       channel.canAdd && ctx.can('library.upload') && h('a', { class: 'btn', href: `#/upload?channel=${id}` }, 'Upload to this channel'),

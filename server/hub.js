@@ -1,6 +1,7 @@
 import { randomInt } from 'node:crypto';
 import { VERSION } from './version.js';
 import { wallClock } from './schedule.js';
+import { DEFAULT_MS, resolve } from './transitions.js';
 
 const PING_MS = 15000;
 const DEAD_MS = 45000;
@@ -20,6 +21,7 @@ export function toSlides(media, placement) {
     type: media.type,
     name: media.name,
     transition: placement.transition ?? 'fade',
+    transitionMs: placement.transitionMs ?? DEFAULT_MS,
     audio: !!placement.audio,
     size: media.size ?? null,
     schedule: placement.schedule ?? null,
@@ -104,16 +106,18 @@ export function createHub(db, log, isAvailable = () => true) {
 
   function channelState(channel) {
     const rows = db.all(
-      `SELECT p.id AS pid, p.duration AS p_duration, p.transition, p.audio,
+      `SELECT p.id AS pid, p.duration AS p_duration, p.transition, p.transition_style, p.transition_ms, p.audio,
               p.start_date, p.end_date, p.start_time, p.end_time, p.days, m.*
        FROM playlist_items p JOIN media m ON m.id = p.media_id
        WHERE p.channel_id = ? AND p.enabled = 1 AND m.status = 'ready'
        ORDER BY p.position, p.id`,
       channel.id,
     );
-    const slides = rows.filter((r) => isAvailable(r.id)).flatMap((r) =>
-      toSlides(r, { key: `p${r.pid}`, duration: r.p_duration, transition: r.transition, audio: r.audio, schedule: scheduleOf(r) }),
-    );
+    const channelDefault = { style: channel.default_transition_style, ms: channel.default_transition_ms };
+    const slides = rows.filter((r) => isAvailable(r.id)).flatMap((r) => {
+      const { style, ms } = resolve({ style: r.transition_style, ms: r.transition_ms }, channelDefault, r.transition);
+      return toSlides(r, { key: `p${r.pid}`, duration: r.p_duration, transition: style, transitionMs: ms, audio: r.audio, schedule: scheduleOf(r) });
+    });
     return {
       type: 'state',
       version: VERSION,
