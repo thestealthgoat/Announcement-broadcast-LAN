@@ -12,6 +12,7 @@ import { createProcessor, resolveFfmpeg } from './media.js';
 import { isLocalAddress, baseUrls } from './lan.js';
 import { userFromToken, httpError, createLoginLimiter, COOKIE } from './auth.js';
 import { listAdmins, resetAdminPassword } from './recovery.js';
+import { createOps } from './ops/index.js';
 import authRoutes from './routes/auth.js';
 import userRoutes from './routes/users.js';
 import channelRoutes from './routes/channels.js';
@@ -19,6 +20,7 @@ import mediaRoutes from './routes/media.js';
 import screenRoutes from './routes/screens.js';
 import overrideRoutes from './routes/overrides.js';
 import settingsRoutes from './routes/settings.js';
+import opsRoutes from './routes/ops.js';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const MAX_UPLOAD = 20 * 1024 ** 3;
@@ -45,7 +47,7 @@ const ADMIN_CSP = [
   "form-action 'self'",
 ].join('; ');
 
-export async function createServer({ dataDir, port = 8080, host = '0.0.0.0', ffmpeg = resolveFfmpeg(), logger = false }) {
+export async function createServer({ dataDir, port = 8080, host = '0.0.0.0', ffmpeg = resolveFfmpeg(), logger = false, ops: opsDeps = {} }) {
   const mediaDir = path.join(dataDir, 'media');
   fs.mkdirSync(mediaDir, { recursive: true });
 
@@ -88,7 +90,8 @@ export async function createServer({ dataDir, port = 8080, host = '0.0.0.0', ffm
 
   const portRef = () => app.server.address()?.port ?? port;
   const limiter = createLoginLimiter();
-  const ctx = { db, hub, processor, mediaDir, port: portRef, limiter };
+  const ops = createOps({ db, hub, dataDir, port: portRef, host, log: app.log, deps: opsDeps });
+  const ctx = { db, hub, processor, mediaDir, port: portRef, limiter, ops };
   await app.register(authRoutes, ctx);
   await app.register(userRoutes, ctx);
   await app.register(channelRoutes, ctx);
@@ -96,6 +99,7 @@ export async function createServer({ dataDir, port = 8080, host = '0.0.0.0', ffm
   await app.register(screenRoutes, ctx);
   await app.register(overrideRoutes, ctx);
   await app.register(settingsRoutes, ctx);
+  await app.register(opsRoutes, ctx);
 
   // TVs do not sign in: each one identifies itself and receives only its channel.
   app.register(async (scope) => {
@@ -138,12 +142,13 @@ export async function createServer({ dataDir, port = 8080, host = '0.0.0.0', ffm
   });
 
   app.addHook('onClose', async () => {
+    await ops.stop();
     processor.stop();
     hub.closeAll();
   });
 
   return {
-    app, db, hub, processor,
+    app, db, hub, processor, ops,
     listAdmins: () => listAdmins(db),
     async resetAdminPassword(userId) {
       const temp = await resetAdminPassword(db, userId);
@@ -154,6 +159,7 @@ export async function createServer({ dataDir, port = 8080, host = '0.0.0.0', ffm
       await app.listen({ port, host });
       processor.resume();
       hub.scheduleOverrideExpiry();
+      ops.start(); // Not awaited: a slow check must never hold up serving.
       return { port: portRef(), urls: baseUrls(portRef()) };
     },
     async stop() {

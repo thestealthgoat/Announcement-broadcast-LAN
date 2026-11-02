@@ -1,9 +1,15 @@
-import { h, api, guard, field, toast } from '../lib.js';
+import { h, api, guard, field, checkbox, toast } from '../lib.js';
+
+function formatBytes(bytes) {
+  if (bytes >= 1024 ** 3) return `${(bytes / 1024 ** 3).toFixed(1)} GB`;
+  return `${Math.round(bytes / 1024 ** 2)} MB`;
+}
 
 export async function settingsView(main, ctx) {
   const isAdmin = ctx.me.role === 'admin';
   const b = await api.get('/api/branding');
   const info = await guard(() => api.get('/api/info'));
+  const ops = await guard(() => api.get('/api/ops/status'));
 
   const orgName = h('input', { type: 'text', value: b.orgName, required: true });
   const primary = h('input', { type: 'color', value: b.primaryColor });
@@ -102,6 +108,19 @@ export async function settingsView(main, ctx) {
       field('Current password', current),
       field('New password (8 or more characters)', next),
       h('button', { type: 'submit' }, 'Change password'),
+    ),
+    ops && h('section', { class: 'card' },
+      h('h2', {}, 'Storage'),
+      h('p', { class: 'small' }, `Library size: ${formatBytes(ops.librarySize)}`, h('br'),
+        ops.storage ? `Free space on this computer: ${formatBytes(ops.storage.free)} of ${formatBytes(ops.storage.total)}` : 'Free space on this computer: not known yet'),
+    ),
+    isAdmin && ops && h('section', { class: 'card' },
+      h('h2', {}, 'Updates'),
+      checkbox('Check for updates', {
+        checked: ops.checkForUpdates,
+        onchange: (e) => guard(() => api.put('/api/ops/settings', { checkForUpdates: e.target.checked })),
+      }),
+      h('p', { class: 'muted small' }, 'Once a day, this computer asks GitHub if there is a newer version and tells you here. Nothing installs by itself. Turn this off and the server makes no internet requests.'),
     ),
     h('section', { class: 'card' },
       h('h2', {}, 'About'),

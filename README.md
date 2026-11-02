@@ -45,6 +45,8 @@ YouTube is intentionally not supported.
 - **Sound:** TV browsers block autoplay with sound unless a kiosk browser allows it. A video with sound turned on plays muted rather than freezing. See [TV setup](docs/TV-SETUP.md).
 - **Forgotten passwords:** an admin can reset anyone's password under **Users**. If an admin is locked out, go to the signage computer and choose **Reset admin password** from the tray menu. It shows a temporary password to sign in with, which you then change under **Settings**. Without the tray app, run `npm run reset-admin -- <username>`. This only works on the host computer, so keep it somewhere trusted.
 - **Backups:** everything is in the data folder (tray menu > **Open data folder**). Copy it while the app is stopped.
+- **Internet use:** the server's only outbound request is a once-a-day check of this project's GitHub Releases for a newer version, which then shows a notice with a link. Nothing downloads or installs by itself. Turn it off under **Settings > Check for updates**, and the server contacts nothing outside your network.
+- **Finding the server:** the app announces itself on your local network as an mDNS service, `_network-signage._tcp`, so the kiosk app can find it. If that fails, everything else keeps working.
 - **Port:** the default is 8080. To change it, put `{ "port": 9000 }` in `config.json` in the data folder and restart.
 
 ### How offline playback works

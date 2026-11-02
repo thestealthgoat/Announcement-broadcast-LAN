@@ -76,6 +76,33 @@ async function renderBanner() {
   }));
 }
 
+let noticesSeq = 0;
+
+async function renderNotices() {
+  const seq = ++noticesSeq;
+  const notices = await api.get('/api/notices').catch(() => null);
+  const slot = document.getElementById('notices');
+  if (!notices || !slot || seq !== noticesSeq) return;
+  slot.replaceChildren(...notices.filter((n) => n.kind !== 'screens').map((n) => {
+    const external = n.link?.href.startsWith('https://');
+    return h('div', { class: `notice ${n.severity}`, role: 'status' },
+      h('div', { class: 'notice-text' }, n.text),
+      n.link && h('a', { class: 'notice-link', href: n.link.href, target: external ? '_blank' : undefined, rel: external ? 'noopener noreferrer' : undefined }, n.link.label),
+      n.dismissible && h('button', {
+        class: 'ghost',
+        onclick: () => api.post(`/api/notices/${encodeURIComponent(n.id)}/dismiss`).catch(() => {}).then(renderNotices),
+      }, 'Dismiss'),
+    );
+  }));
+  const count = notices.find((n) => n.kind === 'screens')?.count ?? 0;
+  const badge = document.getElementById('screens-badge');
+  if (badge) {
+    badge.hidden = !count;
+    badge.textContent = count;
+    badge.title = `${count} offline for more than 5 minutes`;
+  }
+}
+
 function renderShell() {
   const current = location.hash || '#/';
   const { logo, orgName } = ctx.branding;
@@ -87,11 +114,13 @@ function renderShell() {
           href,
           class: isActive(href, current) ? 'active' : '',
           'aria-current': isActive(href, current) ? 'page' : undefined,
-        }, svg(icon), h('span', {}, label))),
+        }, svg(icon), h('span', {}, label),
+          href === '#/' && h('span', { class: 'nav-badge', id: 'screens-badge', hidden: true }))),
         h('div', { class: 'nav-foot' }, ctx.me.name),
       ),
       h('div', { style: 'flex:1;min-width:0' },
         h('div', { id: 'banner' }),
+        h('div', { class: 'notices', id: 'notices' }),
         h('main', { class: 'main', id: 'main' }),
       ),
     ),
@@ -102,6 +131,7 @@ function renderShell() {
 async function showPage() {
   renderShell();
   renderBanner();
+  renderNotices();
   ctx.view?.destroy?.();
   const main = document.getElementById('main');
   ctx.view = (await route()(main, ctx)) ?? null;
@@ -114,6 +144,7 @@ function connectSocket() {
     const msg = JSON.parse(e.data);
     if (msg.type !== 'refresh') return;
     if (msg.scopes.includes('overrides')) renderBanner();
+    if (msg.scopes.includes('notices')) renderNotices();
     if (msg.scopes.includes('branding')) {
       ctx.branding = await api.get('/api/branding');
       applyAccent();
@@ -136,6 +167,7 @@ ctx.refreshBranding = async () => {
   await refreshBranding();
   renderShell();
   renderBanner();
+  renderNotices();
 };
 ctx.signedOut = () => location.reload();
 

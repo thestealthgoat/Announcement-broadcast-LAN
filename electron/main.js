@@ -4,6 +4,7 @@ import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { createServer } from '../server/index.js';
 import { baseUrls } from '../server/lan.js';
+import { updateMenuItems } from '../server/ops/updates.js';
 import { runRecoveryFlow } from './recovery.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -74,6 +75,7 @@ function autostartAllowed() {
 
 function buildMenu() {
   const items = [
+    ...updateMenuItems(server.ops.availableUpdate(), (url) => shell.openExternal(url)),
     { label: 'Show address and QR code', click: showWindow },
     { label: 'Open admin', click: () => shell.openExternal(adminUrl()) },
     { label: `Copy TV address (${tvUrl()})`, click: () => clipboard.writeText(tvUrl()) },

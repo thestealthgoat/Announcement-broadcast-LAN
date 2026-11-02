@@ -1,7 +1,7 @@
 import { requireUser, requireAdmin, httpError } from '../auth.js';
 import { text } from './auth.js';
 
-export default async function screenRoutes(app, { db, hub }) {
+export default async function screenRoutes(app, { db, hub, ops }) {
   const channelOrNull = (value) => {
     if (value === null || value === '') return null;
     const id = Number(value);
@@ -9,8 +9,9 @@ export default async function screenRoutes(app, { db, hub }) {
     return id;
   };
 
-  app.get('/api/screens', { preHandler: requireUser }, async () =>
-    db.all(
+  app.get('/api/screens', { preHandler: requireUser }, async () => {
+    const attention = ops.attentionIds();
+    return db.all(
       `SELECT s.*, c.name AS channel_name, c.slug AS channel_slug
        FROM screens s LEFT JOIN channels c ON c.id = s.channel_id
        ORDER BY s.name COLLATE NOCASE`,
@@ -18,8 +19,9 @@ export default async function screenRoutes(app, { db, hub }) {
       id: s.id, name: s.name, channelId: s.channel_id, channelName: s.channel_name, channelSlug: s.channel_slug,
       pairCode: s.pair_code, online: hub.isOnline(s.id), lastSeen: s.last_seen,
       currentItem: hub.isOnline(s.id) ? s.current_item : null,
-    })),
-  );
+      needsAttention: attention.has(s.id), storageFull: hub.isCacheFull(s.id),
+    }));
+  });
 
   app.post('/api/pair', { preHandler: requireAdmin }, async (req) => {
     const code = String(req.body?.code ?? '').trim();
@@ -44,6 +46,7 @@ export default async function screenRoutes(app, { db, hub }) {
     db.run('UPDATE screens SET name = ?, channel_id = ? WHERE id = ?', name, channelId, screen.id);
     if (channelId !== screen.channel_id) hub.assignScreen(screen.id);
     hub.adminRefresh('screens');
+    hub.adminRefresh('notices');
     hub.adminRefresh('channels');
     return { ok: true };
   });
@@ -56,6 +59,7 @@ export default async function screenRoutes(app, { db, hub }) {
     hub.assignScreen(screen.id);
     db.run('DELETE FROM screens WHERE id = ?', screen.id);
     hub.adminRefresh('screens');
+    hub.adminRefresh('notices');
     hub.adminRefresh('channels');
     return { ok: true };
   });

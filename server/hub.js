@@ -199,18 +199,21 @@ export function createHub(db, log) {
       send(conn.socket, { type: 'pair', code, branding: db.branding(), version: VERSION });
     }
     adminRefresh('screens');
+    adminRefresh('notices');
   }
 
   function heartbeat(conn, msg) {
     if (!conn.deviceId) return;
     const item = typeof msg.item === 'string' ? msg.item.slice(0, 200) : null;
     db.run('UPDATE screens SET last_seen = ?, current_item = ? WHERE id = ?', Date.now(), item, conn.deviceId);
-    if (item !== conn.item) adminRefresh('screens');
+    const cacheFull = msg.cacheFull === true;
+    if (item !== conn.item || cacheFull !== conn.cacheFull) adminRefresh('screens');
     conn.item = item;
+    conn.cacheFull = cacheFull;
   }
 
   function addPlayer(socket) {
-    const conn = { socket, channelId: null, deviceId: null, preview: false, item: null, lastMessage: Date.now() };
+    const conn = { socket, channelId: null, deviceId: null, preview: false, item: null, cacheFull: false, lastMessage: Date.now() };
     players.add(conn);
     socket.on('message', (raw) => {
       conn.lastMessage = Date.now();
@@ -270,6 +273,7 @@ export function createHub(db, log) {
     addPlayer, addAdmin, pushChannel, pushAll, pushMedia, adminRefresh, assignScreen,
     activeOverrides, overrideChannelIds, scheduleOverrideExpiry,
     isOnline: (deviceId) => [...players].some((p) => p.deviceId === deviceId),
+    isCacheFull: (deviceId) => [...players].some((p) => p.deviceId === deviceId && p.cacheFull),
     closeAll() {
       clearInterval(ticker);
       clearTimeout(expiryTimer);
