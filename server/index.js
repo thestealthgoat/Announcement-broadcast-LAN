@@ -54,7 +54,8 @@ const ADMIN_CSP = [
   "media-src 'self' blob:",
   "connect-src 'self' ws: wss:",
   "worker-src 'self' blob:",
-  "frame-src 'self'",
+  // Previewing a web page before adding it needs a frame on any site.
+  "frame-src 'self' http: https:",
   "frame-ancestors 'self'",
   "base-uri 'none'",
   "form-action 'self'",

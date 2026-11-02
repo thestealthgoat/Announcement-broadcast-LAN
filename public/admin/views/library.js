@@ -1,6 +1,7 @@
 import { h, api, guard, field, toast, openDialog, thumb, TYPE_LABEL } from '../lib.js';
 import { deleteFlow, showResult, usageText } from './libraryActions.js';
 import { createDesigner, loadDesignerData } from '../designer.js';
+import { createWebPreview } from './webPreview.js';
 
 const LIVE_STATUS = { live: 'Live feed: on air', idle: 'Live feed: no signal', error: 'Live feed: has a problem', off: 'Live feed: turned off' };
 const PAGE = 60;
@@ -220,6 +221,7 @@ export async function libraryView(main, ctx) {
       const title = h('input', { type: 'text', value: m.title ?? '', disabled: !canChange, oninput: () => designer?.update() });
       const body = h('textarea', { disabled: !canChange, oninput: () => designer?.update() }, m.body ?? '');
       const url = h('input', { type: 'url', value: m.url ?? '', disabled: !canChange });
+      const preview = m.type === 'web' && createWebPreview();
       const folder = h('select', { disabled: !canChange },
         h('option', { value: '', selected: !m.folderId }, 'Top level (no folder)'),
         folders.map((f) => h('option', { value: f.id, selected: f.id === m.folderId }, f.name)),
@@ -276,6 +278,8 @@ export async function libraryView(main, ctx) {
         designer && designer.preview,
         designer && canChange && designer.controls,
         (m.type === 'web' || m.type === 'hls') && !m.live && field('Address', url),
+        preview && h('button', { type: 'button', style: 'margin-bottom:12px', onclick: () => guard(() => preview.show(url.value)) }, 'Preview'),
+        preview && preview.el,
         m.live && h('p', { class: 'muted small' }, 'This is a live feed. It only shows on TVs while it is on air.'),
         h('p', { class: 'small' }, h('strong', {}, "Where it's used: "), m.usage.inUse ? `${usageText(m.usage)}.` : 'Nowhere right now.'),
         field('Folder', folder),
@@ -398,10 +402,27 @@ export async function libraryView(main, ctx) {
     openDialog('Add a web page', (close) => {
       const url = h('input', { type: 'url', required: true, placeholder: 'https://', autocapitalize: 'none' });
       const name = h('input', { type: 'text' });
+      const preview = createWebPreview();
+      const submit = h('button', { type: 'submit', class: 'primary' }, 'Preview');
+      // The address that has been previewed. Adding only opens up once the person has seen it.
+      let previewed = null;
+      url.addEventListener('input', () => {
+        previewed = null;
+        preview.clear();
+        submit.textContent = 'Preview';
+      });
       return h('form', {
         onsubmit: (e) => {
           e.preventDefault();
           guard(async () => {
+            if (previewed !== url.value) {
+              const address = url.value;
+              const status = await preview.show(address);
+              if (url.value !== address || status === 'invalid') return;
+              previewed = address;
+              submit.textContent = status === 'ok' || status === 'stream' ? 'Add' : 'Add anyway';
+              return;
+            }
             await api.post('/api/media/url', { url: url.value, name: name.value });
             close();
             refresh();
@@ -410,10 +431,11 @@ export async function libraryView(main, ctx) {
       },
         field('Address', url),
         field('Name (optional)', name),
-        h('p', { class: 'muted small' }, 'Some sites refuse to appear inside another page, and those will show blank or an error. YouTube is not supported. An address ending in .m3u8 is added as a live stream.'),
+        preview.el,
+        h('p', { class: 'muted small' }, 'Preview shows what a TV will show. For YouTube, use the embed link, which plays muted. An address ending in .m3u8 is added as a live stream.'),
         h('div', { class: 'dialog-foot' },
           h('button', { type: 'button', onclick: close }, 'Cancel'),
-          h('button', { type: 'submit', class: 'primary' }, 'Add')),
+          submit),
       );
     });
   }

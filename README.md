@@ -37,7 +37,7 @@ See [test status](docs/TEST-STATUS.md) for what has been tested so far.
 - **Branding:** organization name, logo, colors, and font.
 - **Resilient TVs:** changes arrive instantly with no refresh. TVs cache media and keep playing through network drops, then reconnect on their own.
 
-YouTube is intentionally not supported.
+YouTube works through its embed links (**Share > Embed**), which play muted. Regular YouTube links are not accepted, because YouTube refuses to appear inside another page.
 
 ## Live feed
 
