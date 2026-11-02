@@ -2,6 +2,7 @@ import { hashPassword, verifyPassword, createSession, destroySession, publicUser
 import { VERSION } from '../version.js';
 import { baseUrls } from '../lan.js';
 import QRCode from 'qrcode';
+import { ROLE_IDS } from '../permissions.js';
 
 export function text(value, field, { max = 200, required = true } = {}) {
   const v = typeof value === 'string' ? value.trim() : '';
@@ -36,8 +37,8 @@ export default async function authRoutes(app, { db, port, limiter }) {
     const hash = await hashPassword(password(b.password));
     if (hasUsers()) throw httpError(409, 'Setup is already complete.');
     const { lastInsertRowid } = db.run(
-      "INSERT INTO users (username, name, password_hash, role, can_override, created_at) VALUES (?, ?, ?, 'admin', 1, ?)",
-      uname, name, hash, Date.now(),
+      "INSERT INTO users (username, name, password_hash, role, can_override, role_id, created_at) VALUES (?, ?, ?, 'admin', 1, ?, ?)",
+      uname, name, hash, ROLE_IDS.admin, Date.now(),
     );
     db.setSetting('branding', { ...db.branding(), orgName });
     createSession(db, reply, Number(lastInsertRowid));

@@ -1,6 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { requireAdmin, httpError } from '../auth.js';
+import { requirePermission, httpError } from '../auth.js';
 import { sniffImage } from '../media.js';
 import { text } from './auth.js';
 
@@ -8,6 +8,7 @@ const HEX = /^#[0-9a-f]{6}$/i;
 const FONT_EXT = /\.(woff2?|ttf|otf)$/i;
 
 export default async function settingsRoutes(app, { db, hub, mediaDir }) {
+  const requireSettings = requirePermission('settings.manage');
   const brandDir = path.join(mediaDir, 'branding');
   const save = (patch) => {
     db.setSetting('branding', { ...db.branding(), ...patch });
@@ -24,7 +25,7 @@ export default async function settingsRoutes(app, { db, hub, mediaDir }) {
 
   app.get('/api/branding', async () => db.branding());
 
-  app.put('/api/branding', { preHandler: requireAdmin }, async (req) => {
+  app.put('/api/branding', { preHandler: requireSettings }, async (req) => {
     const b = req.body ?? {};
     const patch = {};
     if (b.orgName !== undefined) patch.orgName = text(b.orgName, 'Organization name', { max: 100 });
@@ -47,7 +48,7 @@ export default async function settingsRoutes(app, { db, hub, mediaDir }) {
     return save(patch);
   });
 
-  app.post('/api/branding/logo', { preHandler: requireAdmin }, async (req) => {
+  app.post('/api/branding/logo', { preHandler: requireSettings }, async (req) => {
     const part = await req.file();
     if (!part) throw httpError(400, 'No file was sent.');
     const buf = await part.toBuffer();
@@ -56,13 +57,13 @@ export default async function settingsRoutes(app, { db, hub, mediaDir }) {
     return save({ logo: replaceFile(db.branding().logo, `logo-${Date.now()}.${ext}`, buf) });
   });
 
-  app.delete('/api/branding/logo', { preHandler: requireAdmin }, async () => {
+  app.delete('/api/branding/logo', { preHandler: requireSettings }, async () => {
     const { logo } = db.branding();
     if (logo) fs.rmSync(path.join(brandDir, path.basename(logo)), { force: true });
     return save({ logo: null });
   });
 
-  app.post('/api/branding/font', { preHandler: requireAdmin }, async (req) => {
+  app.post('/api/branding/font', { preHandler: requireSettings }, async (req) => {
     const part = await req.file();
     if (!part) throw httpError(400, 'No file was sent.');
     const match = String(part.filename).match(FONT_EXT);

@@ -30,14 +30,16 @@ export async function libraryView(main, ctx) {
   }
 
   function editDialog(m) {
+    const canChange = ctx.can('library.edit') || (ctx.can('library.own') && m.createdBy === ctx.me.id);
+    const canDelete = m.live ? ctx.can('live.manage') : canChange;
     openDialog(m.name, (close) => {
-      const name = h('input', { type: 'text', value: m.name, required: true });
-      const title = h('input', { type: 'text', value: m.title ?? '' });
-      const body = h('textarea', {}, m.body ?? '');
-      const url = h('input', { type: 'url', value: m.url ?? '' });
+      const name = h('input', { type: 'text', value: m.name, required: true, disabled: !canChange });
+      const title = h('input', { type: 'text', value: m.title ?? '', disabled: !canChange });
+      const body = h('textarea', { disabled: !canChange }, m.body ?? '');
+      const url = h('input', { type: 'url', value: m.url ?? '', disabled: !canChange });
       const chanBox = h('div', { class: 'list' });
       api.get('/api/channels').then((channels) => {
-        const editable = channels.filter((c) => c.canEdit);
+        const editable = channels.filter((c) => c.canAdd);
         chanBox.replaceChildren(
           h('div', { class: 'small', style: 'font-weight:600' }, 'Add to a channel'),
           h('div', { class: 'actions' }, editable.map((c) => h('button', {
@@ -68,9 +70,9 @@ export async function libraryView(main, ctx) {
         m.type === 'text' && field('Message', body),
         (m.type === 'web' || m.type === 'hls') && !m.live && field('Address', url),
         m.live && h('p', { class: 'muted small' }, 'This is a live feed. It only shows on TVs while it is on air.'),
-        m.status === 'ready' && chanBox,
+        m.status === 'ready' && ctx.can('channels.add') && chanBox,
         h('div', { class: 'dialog-foot' },
-          (!m.live || ctx.me.role === 'admin') && h('button', {
+          canDelete && h('button', {
             type: 'button',
             class: 'danger-text left',
             onclick: () => guard(async () => {
@@ -80,8 +82,8 @@ export async function libraryView(main, ctx) {
               refresh();
             }),
           }, 'Delete'),
-          h('button', { type: 'button', onclick: close }, 'Cancel'),
-          h('button', { type: 'submit', class: 'primary' }, 'Save'),
+          h('button', { type: 'button', onclick: close }, canChange ? 'Cancel' : 'Close'),
+          canChange && h('button', { type: 'submit', class: 'primary' }, 'Save'),
         ),
       );
     });
@@ -144,7 +146,7 @@ export async function libraryView(main, ctx) {
 
   main.replaceChildren(
     h('div', { class: 'page-head' }, h('h1', {}, 'Library'),
-      h('div', { class: 'actions' },
+      ctx.can('library.upload') && h('div', { class: 'actions' },
         h('a', { class: 'btn primary', href: '#/upload' }, 'Upload'),
         h('button', { onclick: textDialog }, 'Text'),
         h('button', { onclick: urlDialog }, 'Web page'),

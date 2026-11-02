@@ -6,7 +6,7 @@ export async function uploadView(main) {
   const preselect = Number(new URLSearchParams(location.hash.split('?')[1] ?? '').get('channel')) || null;
   const channel = h('select', {},
     h('option', { value: '' }, 'Library only'),
-    channels.filter((c) => c.canEdit).map((c) => h('option', { value: c.id, selected: c.id === preselect }, c.name)),
+    channels.filter((c) => c.canAdd).map((c) => h('option', { value: c.id, selected: c.id === preselect }, c.name)),
   );
   const queueEl = h('div', { class: 'list', style: 'margin-top:12px' });
   let queue = Promise.resolve();

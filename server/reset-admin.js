@@ -1,4 +1,4 @@
-// Resets an admin password from the host computer: npm run reset-admin -- <username>
+// Resets the password of an account with full access, from the host computer: npm run reset-admin -- <username>
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';

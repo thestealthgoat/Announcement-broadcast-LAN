@@ -1,7 +1,8 @@
-import { requireUser, requireOverride, httpError } from '../auth.js';
+import { requireUser, requirePermission, httpError } from '../auth.js';
 import { text } from './auth.js';
 
 export default async function overrideRoutes(app, { db, hub }) {
+  const requireOverride = requirePermission('overrides.push');
   const json = (o) => ({
     id: o.id,
     mediaId: o.media_id,

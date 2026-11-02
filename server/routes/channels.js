@@ -1,4 +1,5 @@
-import { requireUser, requireAdmin, httpError, canEditChannel } from '../auth.js';
+import { requireUser, requirePermission, httpError, canAccessChannel, canAddToChannel, canEditChannel, canManageChannel } from '../auth.js';
+import { hasPermission } from '../permissions.js';
 import { text } from './auth.js';
 import { problem, status, wallClock } from '../schedule.js';
 
@@ -28,13 +29,15 @@ const itemJson = (r, clock) => ({
 });
 
 export default async function channelRoutes(app, { db, hub }) {
+  const requireEdit = requirePermission('channels.edit');
+  const requireManage = requirePermission('channels.manage');
   const getChannel = (id) => {
     const c = db.get('SELECT * FROM channels WHERE id = ?', Number(id));
     if (!c) throw httpError(404, 'Channel not found.');
     return c;
   };
-  const assertCanEdit = (req, channelId) => {
-    if (!canEditChannel(req.user, channelId)) throw httpError(403, 'You are not assigned to this channel.');
+  const assertAccess = (req, channelId) => {
+    if (!canAccessChannel(req.user, channelId)) throw httpError(403, 'You are not assigned to this channel.');
   };
   const items = (channelId) => {
     const clock = wallClock();
@@ -59,31 +62,40 @@ export default async function channelRoutes(app, { db, hub }) {
        FROM channels c ORDER BY c.name COLLATE NOCASE`,
     ).map((c) => ({
       id: c.id, slug: c.slug, name: c.name, itemCount: c.item_count, screenCount: c.screen_count,
+      canAccess: canAccessChannel(req.user, c.id),
+      canAdd: canAddToChannel(req.user, c.id),
       canEdit: canEditChannel(req.user, c.id),
+      canManage: canManageChannel(req.user, c.id),
     })),
   );
 
-  app.post('/api/channels', { preHandler: requireAdmin }, async (req) => {
+  app.post('/api/channels', { preHandler: requireManage }, async (req) => {
     const name = text(req.body?.name, 'Channel name', { max: 80 });
     const root = slugify(name);
     let slug = root;
     for (let n = 2; db.get('SELECT 1 AS x FROM channels WHERE slug = ?', slug); n++) slug = `${root}-${n}`;
     const { lastInsertRowid } = db.run('INSERT INTO channels (slug, name, created_at) VALUES (?, ?, ?)', slug, name, Date.now());
+    // Someone limited to assigned channels would otherwise lock themselves out of the one they just made.
+    if (!hasPermission(req.user, 'channels.all')) {
+      db.run('INSERT INTO user_channels (user_id, channel_id) VALUES (?, ?)', req.user.id, lastInsertRowid);
+    }
     hub.adminRefresh('channels');
     return { id: Number(lastInsertRowid), slug, name };
   });
 
   // The slug is permanent so TV URLs keep working after a rename.
-  app.patch('/api/channels/:id', { preHandler: requireAdmin }, async (req) => {
+  app.patch('/api/channels/:id', { preHandler: requireManage }, async (req) => {
     const c = getChannel(req.params.id);
+    assertAccess(req, c.id);
     const name = text(req.body?.name, 'Channel name', { max: 80 });
     db.run('UPDATE channels SET name = ? WHERE id = ?', name, c.id);
     changed(c.id);
     return { id: c.id, slug: c.slug, name };
   });
 
-  app.delete('/api/channels/:id', { preHandler: requireAdmin }, async (req) => {
+  app.delete('/api/channels/:id', { preHandler: requireManage }, async (req) => {
     const c = getChannel(req.params.id);
+    assertAccess(req, c.id);
     const screens = db.all('SELECT id FROM screens WHERE channel_id = ?', c.id);
     db.run('DELETE FROM channels WHERE id = ?', c.id);
     for (const s of screens) hub.assignScreen(s.id);
@@ -94,13 +106,13 @@ export default async function channelRoutes(app, { db, hub }) {
 
   app.get('/api/channels/:id/items', { preHandler: requireUser }, async (req) => {
     const c = getChannel(req.params.id);
-    assertCanEdit(req, c.id);
+    assertAccess(req, c.id);
     return items(c.id);
   });
 
-  app.post('/api/channels/:id/items', { preHandler: requireUser }, async (req) => {
+  app.post('/api/channels/:id/items', { preHandler: requirePermission('channels.add') }, async (req) => {
     const c = getChannel(req.params.id);
-    assertCanEdit(req, c.id);
+    assertAccess(req, c.id);
     const media = db.get('SELECT id FROM media WHERE id = ?', String(req.body?.mediaId ?? ''));
     if (!media) throw httpError(404, 'Library item not found.');
     addToChannel(db, c.id, media.id);
@@ -108,9 +120,9 @@ export default async function channelRoutes(app, { db, hub }) {
     return items(c.id);
   });
 
-  app.put('/api/channels/:id/order', { preHandler: requireUser }, async (req) => {
+  app.put('/api/channels/:id/order', { preHandler: requireEdit }, async (req) => {
     const c = getChannel(req.params.id);
-    assertCanEdit(req, c.id);
+    assertAccess(req, c.id);
     const ids = req.body?.ids;
     const existing = db.all('SELECT id FROM playlist_items WHERE channel_id = ?', c.id).map((r) => r.id);
     if (
@@ -127,11 +139,11 @@ export default async function channelRoutes(app, { db, hub }) {
   const getItem = (req) => {
     const item = db.get('SELECT * FROM playlist_items WHERE id = ?', Number(req.params.id));
     if (!item) throw httpError(404, 'Playlist item not found.');
-    assertCanEdit(req, item.channel_id);
+    assertAccess(req, item.channel_id);
     return item;
   };
 
-  app.patch('/api/playlist-items/:id', { preHandler: requireUser }, async (req) => {
+  app.patch('/api/playlist-items/:id', { preHandler: requireEdit }, async (req) => {
     const item = getItem(req);
     const b = req.body ?? {};
     let duration = item.duration;
@@ -168,7 +180,7 @@ export default async function channelRoutes(app, { db, hub }) {
     return items(item.channel_id).find((i) => i.id === item.id);
   });
 
-  app.delete('/api/playlist-items/:id', { preHandler: requireUser }, async (req) => {
+  app.delete('/api/playlist-items/:id', { preHandler: requireEdit }, async (req) => {
     const item = getItem(req);
     db.run('DELETE FROM playlist_items WHERE id = ?', item.id);
     changed(item.channel_id);

@@ -1,12 +1,11 @@
 import { h, api, guard, field, checkbox, toast, openDialog, thumb, TYPE_LABEL } from '../lib.js';
 
 export async function channelsView(main, ctx) {
-  const isAdmin = ctx.me.role === 'admin';
   const listEl = h('div', { class: 'list' });
 
   async function refresh() {
     const channels = await api.get('/api/channels');
-    const visible = channels.filter((c) => c.canEdit);
+    const visible = channels.filter((c) => c.canAdd || c.canEdit || c.canManage);
     listEl.replaceChildren(...(visible.length
       ? visible.map((c) => h('a', { class: 'tile', href: `#/channels/${c.id}` },
           h('div', { class: 'grow' },
@@ -20,7 +19,7 @@ export async function channelsView(main, ctx) {
 
   main.replaceChildren(
     h('div', { class: 'page-head' }, h('h1', {}, 'Channels'),
-      isAdmin && h('button', {
+      ctx.can('channels.manage') && h('button', {
         class: 'primary',
         onclick: () => openDialog('New channel', (close) => {
           const name = h('input', { type: 'text', required: true, placeholder: 'Gym Lobby' });
@@ -62,10 +61,9 @@ function formatDuration(seconds) {
 }
 
 export async function channelView(main, ctx, id) {
-  const isAdmin = ctx.me.role === 'admin';
   const channels = await guard(() => api.get('/api/channels'));
   const channel = channels?.find((c) => c.id === id);
-  if (!channel || !channel.canEdit) {
+  if (!channel || !(channel.canAdd || channel.canEdit || channel.canManage)) {
     main.replaceChildren(h('h1', {}, 'Channel not found'), h('p', {}, h('a', { href: '#/channels' }, 'Back to channels')));
     return null;
   }
@@ -221,10 +219,10 @@ export async function channelView(main, ctx, id) {
     const expanded = open.has(item.id);
     return h('div', { class: `pl-item${item.enabled ? '' : ' off'}`, 'data-id': item.id },
       h('div', { class: 'tile' },
-        h('span', { class: 'handle', 'aria-label': 'Drag to reorder', title: 'Drag to reorder' }, '⠿'),
+        channel.canEdit && h('span', { class: 'handle', 'aria-label': 'Drag to reorder', title: 'Drag to reorder' }, '⠿'),
         thumb(m),
         h('div', { class: 'grow' }, h('div', { class: 'title' }, m.name), statusLine(item)),
-        h('button', {
+        channel.canEdit && h('button', {
           class: 'ghost',
           'aria-expanded': String(expanded),
           onclick: () => {
@@ -294,7 +292,7 @@ export async function channelView(main, ctx, id) {
   main.replaceChildren(
     h('div', { class: 'page-head' },
       h('div', {}, h('a', { href: '#/channels', class: 'small' }, '‹ Channels'), h('h1', {}, channel.name)),
-      isAdmin && h('div', { class: 'actions' },
+      channel.canManage && h('div', { class: 'actions' },
         h('button', {
           onclick: () => guard(async () => {
             const next = prompt('Channel name', channel.name);
@@ -321,15 +319,15 @@ export async function channelView(main, ctx, id) {
       h('p', { class: 'muted small', style: 'margin:.6rem 0 0' }, 'TV address: ', h('span', { class: 'code' }, tvUrl)),
     ),
     h('div', { class: 'actions' },
-      h('button', { class: 'primary', onclick: addFromLibrary }, 'Add from library'),
-      h('a', { class: 'btn', href: `#/upload?channel=${id}` }, 'Upload to this channel'),
+      channel.canAdd && h('button', { class: 'primary', onclick: addFromLibrary }, 'Add from library'),
+      channel.canAdd && ctx.can('library.upload') && h('a', { class: 'btn', href: `#/upload?channel=${id}` }, 'Upload to this channel'),
     ),
     listEl,
   );
 
   await refresh();
   const statusTimer = setInterval(() => refreshStatuses().catch(() => {}), STATUS_REFRESH_MS);
-  const sortable = window.Sortable.create(listEl, {
+  const sortable = channel.canEdit && window.Sortable.create(listEl, {
     handle: '.handle',
     animation: 150,
     onStart: () => { dragging = true; },
@@ -346,7 +344,7 @@ export async function channelView(main, ctx, id) {
     refresh: (s) => (s.includes('channels') || s.includes('media')) && guard(refresh),
     destroy: () => {
       clearInterval(statusTimer);
-      sortable.destroy();
+      if (sortable) sortable.destroy();
       observer.disconnect();
     },
   };

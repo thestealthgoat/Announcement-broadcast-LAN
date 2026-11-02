@@ -1,5 +1,6 @@
 import { randomInt } from 'node:crypto';
 import { hashPassword, httpError } from './auth.js';
+import { fullAccessUsers } from './permissions.js';
 
 // Lookalike characters are left out, since this gets read off one screen and typed on another.
 const ALPHABET = 'abcdefghjkmnpqrstuvwxyz23456789';
@@ -9,17 +10,17 @@ function temporaryPassword() {
   return `${group()}-${group()}-${group()}`;
 }
 
+// An admin here is anyone with full access, whatever their role is called.
 export function listAdmins(db) {
-  return db
-    .all("SELECT id, username, name FROM users WHERE role = 'admin' ORDER BY name COLLATE NOCASE")
-    .map((u) => ({ id: u.id, username: u.username, name: u.name }));
+  return fullAccessUsers(db)
+    .map((u) => ({ id: u.id, username: u.username, name: u.name }))
+    .sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: 'base' }));
 }
 
 // Recovery for a locked-out admin. There is deliberately no web route to this:
 // only someone at the host computer can reach it, from the tray menu or a command.
 export async function resetAdminPassword(db, userId) {
-  const row = db.get('SELECT role FROM users WHERE id = ?', userId);
-  if (!row || row.role !== 'admin') throw httpError(400, 'That account is not an admin.');
+  if (!fullAccessUsers(db).some((u) => u.id === userId)) throw httpError(400, 'That account is not an admin with full access.');
   const temp = temporaryPassword();
   const hash = await hashPassword(temp);
   db.run('UPDATE users SET password_hash = ? WHERE id = ?', hash, userId);

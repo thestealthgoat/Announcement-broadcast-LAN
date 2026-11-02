@@ -6,6 +6,7 @@ import { createAddressWatcher } from './address.js';
 import { createStorageWatcher, formatBytes } from './storage.js';
 import { createDiscovery } from './discovery.js';
 import { screensNeedingAttention } from './health.js';
+import { hasPermission } from '../permissions.js';
 
 const TICK_MS = 30 * 1000;
 const FIRST_UPDATE_CHECK_MS = 30 * 1000;
@@ -86,8 +87,8 @@ export function createOps({ db, hub, dataDir, port, host, log, deps = {} }) {
 
   function notices(user) {
     const out = [];
-    const isAdmin = user?.role === 'admin';
-    const moved = isAdmin && address.notice();
+    const seesScreens = hasPermission(user, 'screens.manage');
+    const moved = seesScreens && address.notice();
     if (moved) {
       out.push({
         id: `address-${moved.to}`, kind: 'address', severity: 'warning', dismissible: true,
@@ -102,7 +103,7 @@ export function createOps({ db, hub, dataDir, port, host, log, deps = {} }) {
         link: { href: '#/library', label: 'Open Library' },
       });
     }
-    if (isAdmin) {
+    if (seesScreens) {
       const count = needingAttention().length;
       if (count) {
         out.push({
@@ -111,6 +112,8 @@ export function createOps({ db, hub, dataDir, port, host, log, deps = {} }) {
           link: { href: '#/', label: 'See screens' },
         });
       }
+    }
+    if (hasPermission(user, 'settings.manage')) {
       const update = updates.available();
       if (update && !updates.isDismissed(update.version)) {
         out.push({
@@ -145,8 +148,8 @@ export function createOps({ db, hub, dataDir, port, host, log, deps = {} }) {
       await queue;
       await discovery?.stop();
     },
-    dismiss(id) {
-      const notice = notices({ role: 'admin' }).find((n) => n.id === id);
+    dismiss(id, user) {
+      const notice = notices(user).find((n) => n.id === id);
       if (!notice?.dismissible) return false;
       if (notice.kind === 'address') address.dismiss();
       if (notice.kind === 'update') updates.dismiss(updates.available().version);

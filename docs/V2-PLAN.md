@@ -79,10 +79,10 @@ A guided designer, not a freeform canvas. Text announcements and quick overrides
 
 Custom roles replace the fixed Admin and Editor pair.
 
-- **Permissions:** separate toggles for managing content, editing channels, uploading, deleting library items, pushing overrides, managing screens, live feeds, branding, and users. Access is limited per channel.
-- **Built-in roles:** Admin, Editor, and Uploader, the last for coaches who only add content. Admins can create more.
+- **Permissions:** a fixed list in `server/permissions.js`: upload, edit and delete own uploads, edit and delete any item, add to channels, change channel items and schedules, create and delete channels, every channel or assigned only, overrides, screens, live feeds, branding and settings, users and roles. `server/migrations/005-roles.sql` adds the `roles` table and `users.role_id`. The old `users.role` and `users.can_override` columns are still written, but nothing decides access from them.
+- **Built-in roles:** Admin, Editor, Editor with Override, and Uploader, the last for coaches who only add content. Admins can create more.
 - **Upgrade:** every existing account keeps exactly the access it has today, including the separate override flag. A test proves this on a 1.0.2 database.
-- **Safety:** always keep at least one account with full access, and nobody can grant permissions they don't have. Every route is checked on the server, with a test for each permission.
+- **Safety:** always keep at least one account with full access, and nobody can grant permissions they don't have. Every route is checked on the server. `test/permissions.test.js` lists every route that changes something and fails if a new one is missing, so a new route must be added there.
 
 ### H. Library organization
 

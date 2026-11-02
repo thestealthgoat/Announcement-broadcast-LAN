@@ -33,7 +33,7 @@ See [test status](docs/TEST-STATUS.md) for what has been tested so far.
 - **Video:** every upload is converted to H.264/AAC MP4 for TV compatibility.
 - **Override:** one click puts a message or library item on all or selected channels, until cleared or for a set number of minutes.
 - **Live feeds:** show OBS, vMix, or a capture card on your TVs. See [Live feed](#live-feed).
-- **Users:** admins do everything. Editors manage content on their assigned channels. Override is a separate permission.
+- **Users and roles:** each person has a role and a set of channels. Built-in roles are Admin (everything), Editor (content on assigned channels), Editor with Override (the same, plus overrides), and Uploader (adds content to assigned channels, and can only change what they uploaded). Admins can create custom roles under **Users > Roles**. See [Roles](#roles).
 - **Branding:** organization name, logo, colors, and font.
 - **Resilient TVs:** changes arrive instantly with no refresh. TVs cache media and keep playing through network drops, then reconnect on their own.
 
@@ -41,7 +41,7 @@ YouTube is intentionally not supported.
 
 ## Live feed
 
-An admin creates a feed under **Live Feeds**. It then appears in the Library, and anyone can add it to their channels like any other item. For several live views, such as Program and Multiview, use one feed and one channel for each.
+Someone with permission to manage live feeds creates a feed under **Live Feeds**. It then appears in the Library, and anyone can add it to their channels like any other item. For several live views, such as Program and Multiview, use one feed and one channel for each.
 
 A feed only shows on TVs while it is on air. While it's down, TVs keep rotating through the rest of the channel, and they pick the feed up as soon as it returns. An override on a feed that's down shows "Waiting for the live feed", then switches to the video when it starts.
 
@@ -73,13 +73,31 @@ Each TV downloads its own copy of the video. As a rule of thumb, multiply the fe
 
 In testing with a synthetic source on the host computer, a frame took about 1 to 2 seconds to reach the playlist, and about 3 to 5 seconds to reach the screen in a desktop browser. Real TVs and networks may differ.
 
+## Roles
+
+A role is a checklist of what someone can do:
+
+- **Library:** upload, edit and delete their own uploads, edit and delete any item.
+- **Channels:** add library items, change items on a channel (order, settings, schedules, removal), create, rename, and delete channels, and work on every channel rather than only assigned ones.
+- **Everything else:** overrides, TVs and pairing, live feeds, branding and settings, people and roles.
+
+Some rules always apply:
+
+- **Upgrading keeps everyone's access.** Admins become Admin. Editors become Editor, or Editor with Override if they could push overrides. Their channels stay the same.
+- **Shared items:** a library item can't be changed by someone if it's also on a channel they don't work on, unless they work on every channel.
+- **Overrides reach every channel,** whatever someone's assigned channels are.
+- **Nobody can give access they don't have,** to a person or to a role, and nobody can change the account of someone with more access than them.
+- **Someone always keeps full access.** The last account with every permission can't be demoted or deleted, and its role can't be reduced.
+- **Roles in use can't be deleted.** Move the people to a different role first. Built-in roles can't be changed.
+- **Changes apply right away,** on that person's next action, with no need to sign in again.
+
 ## Good to know
 
 - **Anyone on your network can open a TV address.** Players do not sign in, so media and playlists are visible to anyone on the LAN. Only the admin requires a password. Do not put private material on signage, and consider a separate network for guests.
 - **Requests from outside the local network are refused** by source address. Do not port-forward to this app. It uses plain HTTP, which is not safe over the internet.
 - **Web pages:** some sites refuse to appear inside another page and will show blank.
 - **Sound:** TV browsers block autoplay with sound unless a kiosk browser allows it. A video with sound turned on plays muted rather than freezing. See [TV setup](docs/TV-SETUP.md).
-- **Forgotten passwords:** an admin can reset anyone's password under **Users**. If an admin is locked out, go to the signage computer and choose **Reset admin password** from the tray menu. It shows a temporary password to sign in with, which you then change under **Settings**. Without the tray app, run `npm run reset-admin -- <username>`. This only works on the host computer, so keep it somewhere trusted.
+- **Forgotten passwords:** anyone who can manage people can reset a password under **Users**, for accounts that don't have more access than they do. If an admin is locked out, go to the signage computer and choose **Reset admin password** from the tray menu. It shows a temporary password to sign in with, which you then change under **Settings**. Without the tray app, run `npm run reset-admin -- <username>`. Both work for any account with full access, whatever its role is called. They only work on the host computer, so keep it somewhere trusted.
 - **Backups:** everything is in the data folder (tray menu > **Open data folder**). Copy it while the app is stopped.
 - **Internet use:** the server's only outbound request is a once-a-day check of this project's GitHub Releases for a newer version, which then shows a notice with a link. Nothing downloads or installs by itself. Turn it off under **Settings > Check for updates**, and the server contacts nothing outside your network.
 - **Finding the server:** the app announces itself on your local network as an mDNS service, `_network-signage._tcp`, so the kiosk app can find it. If that fails, everything else keeps working.

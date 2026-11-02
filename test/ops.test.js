@@ -443,14 +443,14 @@ test('address: a change while the app was closed is noticed at the next start', 
   const first = await boot('192.168.1.20');
   await first.start();
   await first.ops.tick();
-  assert.equal(first.ops.notices({ role: 'admin' }).length, 0);
+  assert.equal(first.ops.notices({ permissions: ['screens.manage'] }).length, 0);
   await first.stop();
 
   const second = await boot('192.168.1.77');
   await second.start();
   await second.ops.tick();
-  assert.deepEqual(second.ops.notices({ role: 'admin' }).map((n) => n.id), ['address-192.168.1.77']);
-  assert.deepEqual(second.ops.notices({ role: 'editor' }), []);
+  assert.deepEqual(second.ops.notices({ permissions: ['screens.manage'] }).map((n) => n.id), ['address-192.168.1.77']);
+  assert.deepEqual(second.ops.notices({ permissions: [] }), []);
   await second.stop();
 });
 

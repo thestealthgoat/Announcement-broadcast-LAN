@@ -1,7 +1,7 @@
 import { h, api, guard, field, toast, ago } from '../lib.js';
 
 export async function screensView(main, ctx) {
-  const isAdmin = ctx.me.role === 'admin';
+  const canManage = ctx.can('screens.manage');
   const info = await guard(() => api.get('/api/info'));
   const base = info?.urls[0] ?? location.origin;
   const listEl = h('div', { class: 'list' });
@@ -16,11 +16,11 @@ export async function screensView(main, ctx) {
     const [screens, chans] = await Promise.all([api.get('/api/screens'), api.get('/api/channels')]);
     channels = chans;
     const chosen = channel.value;
-    channel.replaceChildren(...channels.map((c) => h('option', { value: c.id }, c.name)));
+    channel.replaceChildren(...channels.filter((c) => c.canAccess).map((c) => h('option', { value: c.id }, c.name)));
     if (chosen) channel.value = chosen;
 
     const missing = screens.filter((s) => s.needsAttention);
-    attentionEl.hidden = !isAdmin || !missing.length;
+    attentionEl.hidden = !canManage || !missing.length;
     attentionEl.replaceChildren(
       h('h2', {}, 'Needs attention'),
       h('p', { class: 'muted small' }, 'These TVs have been offline for more than 5 minutes. Check that they are turned on and connected. If one is gone for good, remove it below.'),
@@ -38,6 +38,7 @@ export async function screensView(main, ctx) {
   }
 
   function row(s) {
+    const canChange = canManage && (!s.channelId || channels.some((c) => c.id === s.channelId && c.canAccess));
     const status = s.online
       ? (s.pairCode ? `Waiting to pair (code ${s.pairCode})` : s.currentItem ? `Playing: ${s.currentItem}` : 'Online, nothing playing')
       : `Offline, last seen ${ago(s.lastSeen)}`;
@@ -49,7 +50,7 @@ export async function screensView(main, ctx) {
         s.storageFull && h('div', { class: 'small warn-text' }, 'Storage full on this TV'),
         s.storageFull && h('div', { class: 'muted small' }, 'It streams instead of saving, so it may stop during a network drop.'),
       ),
-      isAdmin ? [
+      canChange ? [
         h('select', {
           'aria-label': `Channel for ${s.name}`,
           onchange: (e) => guard(async () => {
@@ -58,7 +59,7 @@ export async function screensView(main, ctx) {
           }),
         },
           h('option', { value: '', selected: !s.channelId }, 'No channel'),
-          channels.map((c) => h('option', { value: c.id, selected: c.id === s.channelId }, c.name)),
+          channels.filter((c) => c.canAccess).map((c) => h('option', { value: c.id, selected: c.id === s.channelId }, c.name)),
         ),
         h('button', {
           class: 'ghost',
@@ -79,8 +80,8 @@ export async function screensView(main, ctx) {
 
   main.replaceChildren(
     h('div', { class: 'page-head' }, h('h1', {}, 'Screens'),
-      h('div', { class: 'actions' }, h('a', { class: 'btn primary', href: '#/upload' }, 'Upload'))),
-    isAdmin && h('section', { class: 'card' },
+      ctx.can('library.upload') && h('div', { class: 'actions' }, h('a', { class: 'btn primary', href: '#/upload' }, 'Upload'))),
+    canManage && h('section', { class: 'card' },
       h('h2', {}, 'Add a TV'),
       h('p', {}, 'On the TV, open ', h('strong', { class: 'code' }, `${base}/tv`), ' and enter the 4-digit code it shows.'),
       h('form', {

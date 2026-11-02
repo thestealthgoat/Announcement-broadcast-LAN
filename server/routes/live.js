@@ -1,7 +1,7 @@
 import net from 'node:net';
 import dgram from 'node:dgram';
 import { randomUUID } from 'node:crypto';
-import { requireAdmin, httpError } from '../auth.js';
+import { requirePermission, httpError } from '../auth.js';
 import { ENCODERS } from '../live/ffmpeg-args.js';
 import { text } from './auth.js';
 
@@ -27,6 +27,7 @@ function portIsFree(port, input) {
 }
 
 export default async function liveRoutes(app, { db, hub, live, port: serverPort }) {
+  const requireLive = requirePermission('live.manage');
   const json = (row) => {
     const m = db.get('SELECT name, url FROM media WHERE id = ?', row.media_id);
     return {
@@ -86,12 +87,12 @@ export default async function liveRoutes(app, { db, hub, live, port: serverPort 
     if (!caps[input]) throw httpError(400, `This computer's copy of ffmpeg cannot receive ${input.toUpperCase()}. Choose a different input type.`);
   }
 
-  app.get('/api/live-feeds', { preHandler: requireAdmin }, async () =>
+  app.get('/api/live-feeds', { preHandler: requireLive }, async () =>
     db.all('SELECT f.* FROM live_feeds f JOIN media m ON m.id = f.media_id ORDER BY m.created_at, f.media_id').map(json),
   );
 
   // Only what works on this computer, so the form can hide everything else.
-  app.get('/api/live-feeds/options', { preHandler: requireAdmin }, async () => {
+  app.get('/api/live-feeds/options', { preHandler: requireLive }, async () => {
     const [caps, devices] = await Promise.all([live.capabilities(), live.devices()]);
     const used = new Set(db.all('SELECT port FROM live_feeds WHERE port IS NOT NULL').map((r) => r.port));
     const suggest = (start) => {
@@ -109,7 +110,7 @@ export default async function liveRoutes(app, { db, hub, live, port: serverPort 
     };
   });
 
-  app.post('/api/live-feeds', { preHandler: requireAdmin }, async (req) => {
+  app.post('/api/live-feeds', { preHandler: requireLive }, async (req) => {
     const b = req.body ?? {};
     const name = text(b.name, 'Name', { max: 120 });
     const f = await validate(b, null);
@@ -132,7 +133,7 @@ export default async function liveRoutes(app, { db, hub, live, port: serverPort 
     return json(getRow(id));
   });
 
-  app.patch('/api/live-feeds/:id', { preHandler: requireAdmin }, async (req) => {
+  app.patch('/api/live-feeds/:id', { preHandler: requireLive }, async (req) => {
     const row = getRow(req.params.id);
     const b = req.body ?? {};
     const name = b.name === undefined ? null : text(b.name, 'Name', { max: 120 });

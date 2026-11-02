@@ -16,6 +16,7 @@ import { listAdmins, resetAdminPassword } from './recovery.js';
 import { createOps } from './ops/index.js';
 import authRoutes from './routes/auth.js';
 import userRoutes from './routes/users.js';
+import roleRoutes from './routes/roles.js';
 import channelRoutes from './routes/channels.js';
 import mediaRoutes from './routes/media.js';
 import screenRoutes from './routes/screens.js';
@@ -54,6 +55,11 @@ export async function createServer({ dataDir, port = 8080, host = '0.0.0.0', ffm
   fs.mkdirSync(mediaDir, { recursive: true });
 
   const app = Fastify({ logger, bodyLimit: 1024 * 1024 });
+  // test/permissions.test.js uses this to prove every route that changes something is checked.
+  const routes = [];
+  app.addHook('onRoute', (r) => {
+    for (const method of [r.method].flat()) routes.push({ method, url: r.url });
+  });
   const db = openDb(path.join(dataDir, 'signage.db'));
   const hub = createHub(db, app.log, (mediaId) => live.isAvailable(mediaId));
   const processor = createProcessor({ db, hub, mediaDir, ffmpeg, log: app.log });
@@ -97,6 +103,7 @@ export async function createServer({ dataDir, port = 8080, host = '0.0.0.0', ffm
   const ctx = { db, hub, processor, mediaDir, port: portRef, limiter, ops, live };
   await app.register(authRoutes, ctx);
   await app.register(userRoutes, ctx);
+  await app.register(roleRoutes, ctx);
   await app.register(channelRoutes, ctx);
   await app.register(mediaRoutes, ctx);
   await app.register(screenRoutes, ctx);
@@ -167,7 +174,7 @@ export async function createServer({ dataDir, port = 8080, host = '0.0.0.0', ffm
   });
 
   return {
-    app, db, hub, processor, ops, live,
+    app, db, hub, processor, ops, live, routes,
     listAdmins: () => listAdmins(db),
     async resetAdminPassword(userId) {
       const temp = await resetAdminPassword(db, userId);

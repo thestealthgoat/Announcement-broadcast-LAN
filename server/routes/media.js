@@ -2,7 +2,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { pipeline } from 'node:stream/promises';
-import { requireUser, httpError, canEditChannel, canEditMedia } from '../auth.js';
+import { requireUser, requirePermission, httpError, canAddToChannel, canEditMedia, mediaInScope } from '../auth.js';
+import { hasPermission } from '../permissions.js';
 import { sniffImage } from '../media.js';
 import { addToChannel } from './channels.js';
 import { text } from './auth.js';
@@ -16,6 +17,7 @@ export function mediaJson(m) {
     src: m.file ? `/media/${m.id}/${m.file}` : m.url ?? null,
     duration: m.duration, pages: m.pages, url: m.url, title: m.title, body: m.body, size: m.size,
     createdAt: m.created_at,
+    createdBy: m.created_by,
     live: isLiveFeedUrl(m.url),
   };
 }
@@ -39,6 +41,7 @@ export function parseWebUrl(value) {
 }
 
 export default async function mediaRoutes(app, { db, hub, processor, live, mediaDir }) {
+  const requireUpload = requirePermission('library.upload');
   const insert = (fields) => {
     const id = fields.id ?? randomUUID();
     db.run(
@@ -58,7 +61,7 @@ export default async function mediaRoutes(app, { db, hub, processor, live, media
     if (req.query.channelId === undefined || req.query.channelId === '') return null;
     const id = Number(req.query.channelId);
     if (!db.get('SELECT 1 AS x FROM channels WHERE id = ?', id)) throw httpError(404, 'Channel not found.');
-    if (!canEditChannel(req.user, id)) throw httpError(403, 'You are not assigned to this channel.');
+    if (!canAddToChannel(req.user, id)) throw httpError(403, 'You cannot add items to this channel.');
     return id;
   };
   const finish = (id, channelId) => {
@@ -71,7 +74,8 @@ export default async function mediaRoutes(app, { db, hub, processor, live, media
     return mediaJson(getMedia(id));
   };
   const assertCanEdit = (req, id) => {
-    if (!canEditMedia(db, req.user, id)) throw httpError(403, 'This item is also used on channels you do not manage.');
+    if (canEditMedia(db, req.user, id)) return;
+    throw httpError(403, mediaInScope(db, req.user, id) ? 'You can only change items you uploaded.' : 'This item is also used on channels you do not manage.');
   };
 
   app.get('/api/media', { preHandler: requireUser }, async () =>
@@ -79,7 +83,7 @@ export default async function mediaRoutes(app, { db, hub, processor, live, media
   );
 
   // Image or video upload, streamed straight to disk.
-  app.post('/api/media', { preHandler: requireUser }, async (req) => {
+  app.post('/api/media', { preHandler: requireUpload }, async (req) => {
     const channelId = targetChannel(req);
     const part = await req.file();
     if (!part) throw httpError(400, 'No file was sent.');
@@ -121,7 +125,7 @@ export default async function mediaRoutes(app, { db, hub, processor, live, media
 
   // PDFs are rendered to page images by the browser, which keeps the server
   // free of native PDF libraries. Create the item, send each page, then finish.
-  app.post('/api/media/pdf', { preHandler: requireUser }, async (req) => {
+  app.post('/api/media/pdf', { preHandler: requireUpload }, async (req) => {
     const name = text(req.body?.name, 'Name', { max: 120 });
     const pages = Number(req.body?.pages);
     if (!Number.isInteger(pages) || pages < 1 || pages > 500) throw httpError(400, 'A PDF can have 1 to 500 pages.');
@@ -138,7 +142,7 @@ export default async function mediaRoutes(app, { db, hub, processor, live, media
     return m;
   };
 
-  app.post('/api/media/:id/pages/:n', { preHandler: requireUser }, async (req) => {
+  app.post('/api/media/:id/pages/:n', { preHandler: requireUpload }, async (req) => {
     const m = getPdfUpload(req);
     const n = Number(req.params.n);
     if (!Number.isInteger(n) || n < 1 || n > m.pages) throw httpError(400, 'Bad page number.');
@@ -150,7 +154,7 @@ export default async function mediaRoutes(app, { db, hub, processor, live, media
     return { ok: true };
   });
 
-  app.post('/api/media/:id/finish', { preHandler: requireUser }, async (req) => {
+  app.post('/api/media/:id/finish', { preHandler: requireUpload }, async (req) => {
     const channelId = targetChannel(req);
     const m = getPdfUpload(req);
     const dir = path.join(mediaDir, m.id);
@@ -164,14 +168,14 @@ export default async function mediaRoutes(app, { db, hub, processor, live, media
     return finish(m.id, channelId);
   });
 
-  app.post('/api/media/text', { preHandler: requireUser }, async (req) => {
+  app.post('/api/media/text', { preHandler: requireUpload }, async (req) => {
     const channelId = targetChannel(req);
     const title = text(req.body?.title, 'Title', { max: 200 });
     const body = text(req.body?.body, 'Message', { max: 2000, required: false });
     return finish(insert({ type: 'text', name: title.slice(0, 120), title, body, userId: req.user.id }), channelId);
   });
 
-  app.post('/api/media/url', { preHandler: requireUser }, async (req) => {
+  app.post('/api/media/url', { preHandler: requireUpload }, async (req) => {
     const channelId = targetChannel(req);
     const url = parseWebUrl(req.body?.url);
     const name = text(req.body?.name, 'Name', { max: 120, required: false }) || url.hostname;
@@ -179,7 +183,7 @@ export default async function mediaRoutes(app, { db, hub, processor, live, media
     return finish(insert({ type, name, url: url.href, userId: req.user.id }), channelId);
   });
 
-  app.patch('/api/media/:id', { preHandler: requireUser }, async (req) => {
+  app.patch('/api/media/:id', { preHandler: requirePermission('library.edit', 'library.own') }, async (req) => {
     const m = getMedia(req.params.id);
     assertCanEdit(req, m.id);
     const b = req.body ?? {};
@@ -201,10 +205,12 @@ export default async function mediaRoutes(app, { db, hub, processor, live, media
     return mediaJson(getMedia(m.id));
   });
 
-  app.delete('/api/media/:id', { preHandler: requireUser }, async (req) => {
+  // A live feed belongs to whoever manages live feeds, so library permissions alone can't delete one.
+  app.delete('/api/media/:id', { preHandler: requirePermission('library.edit', 'library.own', 'live.manage') }, async (req) => {
     const m = getMedia(req.params.id);
-    assertCanEdit(req, m.id);
-    if (live.isFeed(m.id) && req.user.role !== 'admin') throw httpError(403, 'Only admins can delete a live feed.');
+    if (!live.isFeed(m.id)) assertCanEdit(req, m.id);
+    else if (!hasPermission(req.user, 'live.manage')) throw httpError(403, 'You do not have permission to delete a live feed.');
+    else if (!mediaInScope(db, req.user, m.id)) throw httpError(403, 'This item is also used on channels you do not manage.');
     const channels = db.all('SELECT DISTINCT channel_id FROM playlist_items WHERE media_id = ?', m.id);
     const wasOverride = db.get('SELECT 1 AS x FROM overrides WHERE media_id = ? AND cleared_at IS NULL', m.id);
     await live.remove(m.id);

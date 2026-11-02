@@ -6,6 +6,7 @@ import { libraryView } from './views/library.js';
 import { uploadView } from './views/uploadPage.js';
 import { overrideView } from './views/override.js';
 import { usersView } from './views/users.js';
+import { rolesView } from './views/roles.js';
 import { settingsView } from './views/settings.js';
 import { liveView } from './views/live.js';
 
@@ -20,39 +21,44 @@ const ICONS = {
   settings: 'M4 7h10M18 7h2M4 17h2M10 17h10M16 5v4M8 15v4',
 };
 
-const ctx = { me: null, branding: null, view: null };
+const ctx = { me: null, branding: null, view: null, can: (key) => !!ctx.me?.permissions.includes(key) };
 let socket = null;
+const usesChannels = () => ['channels.add', 'channels.edit', 'channels.manage'].some(ctx.can);
 
 function navItems() {
   return [
     ['#/', 'Screens', ICONS.screens],
-    ['#/channels', 'Channels', ICONS.channels],
+    usesChannels() && ['#/channels', 'Channels', ICONS.channels],
     ['#/library', 'Library', ICONS.library],
-    ctx.me.canOverride && ['#/override', 'Override', ICONS.override],
-    ctx.me.role === 'admin' && ['#/live', 'Live Feeds', ICONS.live],
-    ctx.me.role === 'admin' && ['#/users', 'Users', ICONS.users],
+    ctx.can('overrides.push') && ['#/override', 'Override', ICONS.override],
+    ctx.can('live.manage') && ['#/live', 'Live Feeds', ICONS.live],
+    ctx.can('users.manage') && ['#/users', 'Users', ICONS.users],
     ['#/settings', 'Settings', ICONS.settings],
   ].filter(Boolean);
 }
 
 function isActive(hash, current) {
   if (hash === '#/') return current === '#/' || current === '';
-  return current.startsWith(hash) || (hash === '#/library' && current.startsWith('#/upload'));
+  return current.startsWith(hash)
+    || (hash === '#/library' && current.startsWith('#/upload'))
+    || (hash === '#/users' && current.startsWith('#/roles'));
 }
 
 function route() {
   const hash = location.hash || '#/';
   const [path] = hash.slice(1).split('?');
   const parts = path.split('/').filter(Boolean);
-  const admin = ctx.me.role === 'admin';
   switch (parts[0]) {
     case undefined: return screensView;
-    case 'channels': return parts[1] ? (c, x) => channelView(c, x, Number(parts[1])) : channelsView;
+    case 'channels':
+      if (!usesChannels()) return screensView;
+      return parts[1] ? (c, x) => channelView(c, x, Number(parts[1])) : channelsView;
     case 'library': return libraryView;
-    case 'upload': return uploadView;
-    case 'override': return ctx.me.canOverride ? overrideView : screensView;
-    case 'users': return admin ? usersView : screensView;
-    case 'live': return admin ? liveView : screensView;
+    case 'upload': return ctx.can('library.upload') ? uploadView : screensView;
+    case 'override': return ctx.can('overrides.push') ? overrideView : screensView;
+    case 'users': return ctx.can('users.manage') ? usersView : screensView;
+    case 'roles': return ctx.can('users.manage') ? rolesView : screensView;
+    case 'live': return ctx.can('live.manage') ? liveView : screensView;
     case 'settings': return settingsView;
     default: return screensView;
   }
@@ -69,7 +75,7 @@ async function renderBanner() {
     const until = o.endsAt ? `until ${new Date(o.endsAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}` : 'until cleared';
     return h('div', { class: 'banner', role: 'alert' },
       h('div', {}, `Override active: ${what} `, h('span', { class: 'sub' }, `on ${where}, ${until}`)),
-      ctx.me.canOverride && h('button', {
+      ctx.can('overrides.push') && h('button', {
         onclick: () => guard(async () => {
           await api.del(`/api/overrides/${o.id}`);
           renderBanner();
@@ -147,6 +153,15 @@ function connectSocket() {
   socket.onmessage = async (e) => {
     const msg = JSON.parse(e.data);
     if (msg.type !== 'refresh') return;
+    // Someone may have just changed this person's role, so the menus need to follow.
+    if (msg.scopes.includes('users')) {
+      const me = await api.get('/api/me').catch(() => null);
+      if (me && JSON.stringify(me) !== JSON.stringify(ctx.me)) {
+        ctx.me = me;
+        showPage();
+        return;
+      }
+    }
     if (msg.scopes.includes('overrides')) renderBanner();
     if (msg.scopes.includes('notices')) renderNotices();
     if (msg.scopes.includes('branding')) {

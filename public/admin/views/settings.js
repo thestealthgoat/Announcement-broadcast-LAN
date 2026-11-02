@@ -6,7 +6,7 @@ function formatBytes(bytes) {
 }
 
 export async function settingsView(main, ctx) {
-  const isAdmin = ctx.me.role === 'admin';
+  const canSettings = ctx.can('settings.manage');
   const b = await api.get('/api/branding');
   const info = await guard(() => api.get('/api/info'));
   const ops = await guard(() => api.get('/api/ops/status'));
@@ -53,7 +53,7 @@ export async function settingsView(main, ctx) {
 
   main.replaceChildren(
     h('div', { class: 'page-head' }, h('h1', {}, 'Settings')),
-    isAdmin && h('form', {
+    canSettings && h('form', {
       class: 'card',
       onsubmit: (e) => {
         e.preventDefault();
@@ -114,7 +114,7 @@ export async function settingsView(main, ctx) {
       h('p', { class: 'small' }, `Library size: ${formatBytes(ops.librarySize)}`, h('br'),
         ops.storage ? `Free space on this computer: ${formatBytes(ops.storage.free)} of ${formatBytes(ops.storage.total)}` : 'Free space on this computer: not known yet'),
     ),
-    isAdmin && ops && h('section', { class: 'card' },
+    canSettings && ops && h('section', { class: 'card' },
       h('h2', {}, 'Updates'),
       checkbox('Check for updates', {
         checked: ops.checkForUpdates,
