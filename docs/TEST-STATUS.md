@@ -20,6 +20,7 @@ What has been tested on real setups, and what hasn't. Last updated November 2, 2
 | Area | Status |
 | --- | --- |
 | Overnight run on Fire TV Stick | In progress |
+| Schedules on a real TV | Not tested |
 | Network drop on Fire TV Stick | Not tested |
 | Video with sound on Fire TV Stick | Not tested |
 | Fully Kiosk Browser, and auto-start after a power cut | Not tested |

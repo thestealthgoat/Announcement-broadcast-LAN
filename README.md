@@ -29,6 +29,7 @@ See [test status](docs/TEST-STATUS.md) for what has been tested so far.
 - **Channels:** a channel is a named playlist. Each TV plays one channel, and many TVs can share one.
 - **Library:** images (JPG, PNG, WebP, GIF), video, PDF (one slide per page), web pages, and text announcements. Items can appear on several channels.
 - **Per item:** duration, transition (cut, fade, slide), sound (off by default), and show/hide. Drag to reorder, with a live preview.
+- **Scheduling:** give any item on a channel start and end dates, times of day (overnight works), and days of the week. Each item shows as On now, Scheduled, or Ended. TVs follow the host computer's clock, even if their own is wrong, and keep to the schedule through network drops.
 - **Video:** every upload is converted to H.264/AAC MP4 for TV compatibility.
 - **Override:** one click puts a message or library item on all or selected channels, until cleared or for a set number of minutes.
 - **Users:** admins do everything. Editors manage content on their assigned channels. Override is a separate permission.

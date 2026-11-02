@@ -1,5 +1,6 @@
 import { requireUser, requireAdmin, httpError, canEditChannel } from '../auth.js';
 import { text } from './auth.js';
+import { problem, status, wallClock } from '../schedule.js';
 
 const TRANSITIONS = ['cut', 'fade', 'slide'];
 
@@ -7,7 +8,9 @@ export function slugify(name) {
   return name.toLowerCase().normalize('NFKD').replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40) || 'channel';
 }
 
-const itemJson = (r) => ({
+const scheduleJson = (r) => ({ startDate: r.start_date, endDate: r.end_date, startTime: r.start_time, endTime: r.end_time, days: r.days });
+
+const itemJson = (r, clock) => ({
   id: r.pid,
   channelId: r.channel_id,
   mediaId: r.media_id,
@@ -16,6 +19,8 @@ const itemJson = (r) => ({
   transition: r.transition,
   audio: !!r.audio,
   enabled: !!r.enabled,
+  ...scheduleJson(r),
+  scheduleStatus: status(scheduleJson(r), clock),
   media: {
     id: r.media_id, type: r.type, name: r.name, status: r.status, error: r.error, progress: r.progress,
     thumb: r.thumb ? `/media/${r.media_id}/${r.thumb}` : null, duration: r.m_duration, pages: r.pages,
@@ -31,14 +36,17 @@ export default async function channelRoutes(app, { db, hub }) {
   const assertCanEdit = (req, channelId) => {
     if (!canEditChannel(req.user, channelId)) throw httpError(403, 'You are not assigned to this channel.');
   };
-  const items = (channelId) =>
-    db.all(
+  const items = (channelId) => {
+    const clock = wallClock();
+    return db.all(
       `SELECT p.id AS pid, p.channel_id, p.media_id, p.position, p.duration AS p_duration, p.transition, p.audio, p.enabled,
+              p.start_date, p.end_date, p.start_time, p.end_time, p.days,
               m.type, m.name, m.status, m.error, m.progress, m.thumb, m.duration AS m_duration, m.pages
        FROM playlist_items p JOIN media m ON m.id = p.media_id
        WHERE p.channel_id = ? ORDER BY p.position, p.id`,
       channelId,
-    ).map(itemJson);
+    ).map((r) => itemJson(r, clock));
+  };
   const changed = (channelId) => {
     hub.pushChannel(channelId);
     hub.adminRefresh('channels');
@@ -136,11 +144,24 @@ export default async function channelRoutes(app, { db, hub }) {
     }
     const transition = b.transition ?? item.transition;
     if (!TRANSITIONS.includes(transition)) throw httpError(400, 'Unknown transition.');
+    // Fields left out keep their value. A cleared form field sends '', which means no value.
+    const merged = (key, current) => (b[key] === undefined ? current : b[key] === '' ? null : b[key]);
+    const schedule = {
+      startDate: merged('startDate', item.start_date),
+      endDate: merged('endDate', item.end_date),
+      startTime: merged('startTime', item.start_time),
+      endTime: merged('endTime', item.end_time),
+      days: merged('days', item.days),
+    };
+    const why = problem(schedule);
+    if (why) throw httpError(400, why);
     db.run(
-      'UPDATE playlist_items SET duration = ?, transition = ?, audio = ?, enabled = ? WHERE id = ?',
+      `UPDATE playlist_items SET duration = ?, transition = ?, audio = ?, enabled = ?,
+         start_date = ?, end_date = ?, start_time = ?, end_time = ?, days = ? WHERE id = ?`,
       duration, transition,
       b.audio === undefined ? item.audio : b.audio ? 1 : 0,
       b.enabled === undefined ? item.enabled : b.enabled ? 1 : 0,
+      schedule.startDate, schedule.endDate, schedule.startTime, schedule.endTime, schedule.days,
       item.id,
     );
     changed(item.channel_id);
