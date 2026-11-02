@@ -7,6 +7,7 @@ import { requireUser, requirePermission, httpError, canAddToChannel, canEditMedi
 import { deleteBlock, findDuplicate, removeMedia } from '../library.js';
 import { sniffImage } from '../media.js';
 import { addToChannel } from './channels.js';
+import { parseStyle, validateStyle } from '../slide-style.js';
 import { text } from './auth.js';
 
 const VIDEO_EXT = /\.(mp4|m4v|mov|webm|mkv|avi|mpe?g|wmv|ts|mts|m2ts|3gp)$/i;
@@ -17,6 +18,7 @@ export function mediaJson(m) {
     thumb: m.thumb ? `/media/${m.id}/${m.thumb}` : null,
     src: m.file ? `/media/${m.id}/${m.file}` : m.url ?? null,
     duration: m.duration, pages: m.pages, url: m.url, title: m.title, body: m.body, size: m.size,
+    style: parseStyle(m.style),
     createdAt: m.created_at,
     createdBy: m.created_by,
     folderId: m.folder_id ?? null,
@@ -47,10 +49,10 @@ export default async function mediaRoutes(app, { db, hub, processor, live, media
   const insert = (fields) => {
     const id = fields.id ?? randomUUID();
     db.run(
-      `INSERT INTO media (id, type, name, status, file, pages, url, title, body, size, sha256, created_by, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO media (id, type, name, status, file, pages, url, title, body, size, sha256, style, created_by, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       id, fields.type, fields.name, fields.status ?? 'ready', fields.file ?? null, fields.pages ?? null,
-      fields.url ?? null, fields.title ?? null, fields.body ?? null, fields.size ?? null, fields.sha256 ?? null, fields.userId, Date.now(),
+      fields.url ?? null, fields.title ?? null, fields.body ?? null, fields.size ?? null, fields.sha256 ?? null, fields.style ?? null, fields.userId, Date.now(),
     );
     return id;
   };
@@ -74,6 +76,10 @@ export default async function mediaRoutes(app, { db, hub, processor, live, media
     }
     hub.adminRefresh('media');
     return mediaJson(getMedia(id));
+  };
+  const styleJson = (value) => {
+    const style = validateStyle(db, value ?? null);
+    return style ? JSON.stringify(style) : null;
   };
   const assertCanEdit = (req, id) => {
     if (canEditMedia(db, req.user, id)) return;
@@ -184,7 +190,8 @@ export default async function mediaRoutes(app, { db, hub, processor, live, media
     const channelId = targetChannel(req);
     const title = text(req.body?.title, 'Title', { max: 200 });
     const body = text(req.body?.body, 'Message', { max: 2000, required: false });
-    return finish(insert({ type: 'text', name: title.slice(0, 120), title, body, userId: req.user.id }), channelId);
+    const style = styleJson(req.body?.style);
+    return finish(insert({ type: 'text', name: title.slice(0, 120), title, body, style, userId: req.user.id }), channelId);
   });
 
   app.post('/api/media/url', { preHandler: requireUpload }, async (req) => {
@@ -200,17 +207,20 @@ export default async function mediaRoutes(app, { db, hub, processor, live, media
     assertCanEdit(req, m.id);
     const b = req.body ?? {};
     const name = b.name === undefined ? m.name : text(b.name, 'Name', { max: 120 });
-    let { title, body, url } = m;
+    let { title, body, url, style } = m;
     if (m.type === 'text') {
       if (b.title !== undefined) title = text(b.title, 'Title', { max: 200 });
       if (b.body !== undefined) body = text(b.body, 'Message', { max: 2000, required: false });
+      if (b.style !== undefined) style = styleJson(b.style);
+    } else if (b.style !== undefined) {
+      throw httpError(400, 'Only text announcements have a design.');
     }
     if (live.isFeed(m.id)) {
       if (b.url !== undefined && b.url !== m.url) throw httpError(400, "A live feed's address cannot be changed.");
     } else if ((m.type === 'web' || m.type === 'hls') && b.url !== undefined) {
       url = parseWebUrl(b.url).href;
     }
-    db.run('UPDATE media SET name = ?, title = ?, body = ?, url = ?, rev = rev + 1 WHERE id = ?', name, title, body, url, m.id);
+    db.run('UPDATE media SET name = ?, title = ?, body = ?, url = ?, style = ?, rev = rev + 1 WHERE id = ?', name, title, body, url, style, m.id);
     hub.pushMedia(m.id);
     hub.adminRefresh('media');
     hub.adminRefresh('channels');

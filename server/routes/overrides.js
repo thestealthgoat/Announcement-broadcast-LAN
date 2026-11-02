@@ -1,4 +1,5 @@
 import { requireUser, requirePermission, httpError } from '../auth.js';
+import { parseStyle, validateStyle } from '../slide-style.js';
 import { text } from './auth.js';
 
 export default async function overrideRoutes(app, { db, hub }) {
@@ -9,6 +10,7 @@ export default async function overrideRoutes(app, { db, hub }) {
     mediaName: o.media_id ? db.get('SELECT name FROM media WHERE id = ?', o.media_id)?.name ?? null : null,
     title: o.title,
     body: o.body,
+    style: parseStyle(o.style),
     audio: !!o.audio,
     allChannels: !!o.all_channels,
     channelIds: hub.overrideChannelIds(o.id),
@@ -23,13 +25,16 @@ export default async function overrideRoutes(app, { db, hub }) {
     const mediaId = b.mediaId ? String(b.mediaId) : null;
     let title = null;
     let body = null;
+    let style = null;
     if (mediaId) {
       const media = db.get('SELECT status FROM media WHERE id = ?', mediaId);
       if (!media) throw httpError(404, 'Library item not found.');
       if (media.status !== 'ready') throw httpError(409, 'That item is not ready yet.');
+      if (b.style !== undefined && b.style !== null) throw httpError(400, 'A design only applies to a quick message.');
     } else {
       title = text(b.title, 'Message', { max: 200 });
       body = text(b.body, 'Details', { max: 2000, required: false });
+      style = validateStyle(db, b.style ?? null);
     }
     const all = !!b.allChannels;
     const channelIds = all ? [] : (Array.isArray(b.channelIds) ? b.channelIds : []).map(Number);
@@ -45,9 +50,9 @@ export default async function overrideRoutes(app, { db, hub }) {
     }
     const id = db.tx(() => {
       const { lastInsertRowid } = db.run(
-        `INSERT INTO overrides (media_id, title, body, audio, all_channels, started_at, ends_at, created_by)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-        mediaId, title, body, b.audio ? 1 : 0, all ? 1 : 0, Date.now(), endsAt, req.user.id,
+        `INSERT INTO overrides (media_id, title, body, style, audio, all_channels, started_at, ends_at, created_by)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        mediaId, title, body, style ? JSON.stringify(style) : null, b.audio ? 1 : 0, all ? 1 : 0, Date.now(), endsAt, req.user.id,
       );
       for (const c of new Set(channelIds)) {
         db.run('INSERT INTO override_channels (override_id, channel_id) VALUES (?, ?)', lastInsertRowid, c);

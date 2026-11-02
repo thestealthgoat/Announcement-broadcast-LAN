@@ -1,5 +1,6 @@
 import { h, api, guard, field, toast, openDialog, thumb, TYPE_LABEL } from '../lib.js';
 import { deleteFlow, showResult, usageText } from './libraryActions.js';
+import { createDesigner, loadDesignerData } from '../designer.js';
 
 const LIVE_STATUS = { live: 'Live feed: on air', idle: 'Live feed: no signal', error: 'Live feed: has a problem', off: 'Live feed: turned off' };
 const PAGE = 60;
@@ -52,7 +53,7 @@ export async function libraryView(main, ctx) {
       class: `media-card${on ? ' selected' : ''}`,
       'aria-pressed': selecting ? String(on) : undefined,
       onclick: () => {
-        if (!selecting) return editDialog(m);
+        if (!selecting) return guard(async () => editDialog(m, m.type === 'text' ? await loadDesignerData() : null));
         if (on) selected.delete(m.id);
         else selected.add(m.id);
         return render();
@@ -212,12 +213,12 @@ export async function libraryView(main, ctx) {
     selectBtn.textContent = selecting ? 'Done' : 'Select';
   }
 
-  function editDialog(m) {
+  function editDialog(m, designerData) {
     const canChange = m.canEdit;
     openDialog(m.name, (close) => {
       const name = h('input', { type: 'text', value: m.name, required: true, disabled: !canChange });
-      const title = h('input', { type: 'text', value: m.title ?? '', disabled: !canChange });
-      const body = h('textarea', { disabled: !canChange }, m.body ?? '');
+      const title = h('input', { type: 'text', value: m.title ?? '', disabled: !canChange, oninput: () => designer?.update() });
+      const body = h('textarea', { disabled: !canChange, oninput: () => designer?.update() }, m.body ?? '');
       const url = h('input', { type: 'url', value: m.url ?? '', disabled: !canChange });
       const folder = h('select', { disabled: !canChange },
         h('option', { value: '', selected: !m.folderId }, 'Top level (no folder)'),
@@ -227,6 +228,13 @@ export async function libraryView(main, ctx) {
         tag: t,
         input: h('input', { type: 'checkbox', checked: m.tags.some((x) => x.id === t.id), disabled: !canChange }),
       }));
+      const designer = designerData && createDesigner({
+        data: designerData,
+        initial: m.style,
+        readOnly: !canChange,
+        canManage: canChange && ctx.can('settings.manage'),
+        getText: () => ({ title: title.value, body: body.value }),
+      });
       const chanBox = h('div', { class: 'list' });
       api.get('/api/channels').then((channels) => {
         const editable = channels.filter((c) => c.canAdd);
@@ -246,7 +254,7 @@ export async function libraryView(main, ctx) {
           e.preventDefault();
           guard(async () => {
             const patch = { name: name.value };
-            if (m.type === 'text') Object.assign(patch, { title: title.value, body: body.value });
+            if (m.type === 'text') Object.assign(patch, { title: title.value, body: body.value, style: designer.getStyle() });
             if ((m.type === 'web' || m.type === 'hls') && !m.live) patch.url = url.value;
             await api.patch(`/api/media/${m.id}`, patch);
             const folderId = folder.value ? Number(folder.value) : null;
@@ -262,8 +270,11 @@ export async function libraryView(main, ctx) {
       },
         m.thumb && h('img', { src: m.thumb, alt: '', style: 'width:100%;border-radius:8px;margin-bottom:12px' }),
         field('Name', name),
+        designer && canChange && designer.chips,
         m.type === 'text' && field('Title', title),
         m.type === 'text' && field('Message', body),
+        designer && designer.preview,
+        designer && canChange && designer.controls,
         (m.type === 'web' || m.type === 'hls') && !m.live && field('Address', url),
         m.live && h('p', { class: 'muted small' }, 'This is a live feed. It only shows on TVs while it is on air.'),
         h('p', { class: 'small' }, h('strong', {}, "Where it's used: "), m.usage.inUse ? `${usageText(m.usage)}.` : 'Nowhere right now.'),
@@ -351,22 +362,31 @@ export async function libraryView(main, ctx) {
     });
   }
 
-  function textDialog() {
+  async function textDialog() {
+    const designerData = await loadDesignerData();
     openDialog('New text announcement', (close) => {
-      const title = h('input', { type: 'text', required: true, maxlength: 200 });
-      const body = h('textarea', { maxlength: 2000 });
+      const title = h('input', { type: 'text', required: true, maxlength: 200, oninput: () => designer.update() });
+      const body = h('textarea', { maxlength: 2000, oninput: () => designer.update() });
+      const designer = createDesigner({
+        data: designerData,
+        canManage: ctx.can('settings.manage'),
+        getText: () => ({ title: title.value, body: body.value }),
+      });
       return h('form', {
         onsubmit: (e) => {
           e.preventDefault();
           guard(async () => {
-            await api.post('/api/media/text', { title: title.value, body: body.value });
+            await api.post('/api/media/text', { title: title.value, body: body.value, style: designer.getStyle() });
             close();
             refresh();
           });
         },
       },
+        designer.chips,
         field('Title', title),
         field('Message (optional)', body),
+        designer.preview,
+        designer.controls,
         h('div', { class: 'dialog-foot' },
           h('button', { type: 'button', onclick: close }, 'Cancel'),
           h('button', { type: 'submit', class: 'primary' }, 'Add')),
@@ -430,7 +450,7 @@ export async function libraryView(main, ctx) {
     h('div', { class: 'page-head' }, h('h1', {}, 'Library'),
       h('div', { class: 'actions' },
         ctx.can('library.upload') && h('a', { class: 'btn primary', href: '#/upload' }, 'Upload'),
-        ctx.can('library.upload') && h('button', { onclick: textDialog }, 'Text'),
+        ctx.can('library.upload') && h('button', { onclick: () => guard(textDialog) }, 'Text'),
         ctx.can('library.upload') && h('button', { onclick: urlDialog }, 'Web page'),
         canOrganize && h('button', { onclick: organizeDialog }, 'Folders and tags'),
         canTouchItems && h('a', { class: 'btn', href: '#/library/cleanup' }, 'Clean up'),

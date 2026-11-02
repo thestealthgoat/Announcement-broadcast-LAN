@@ -78,6 +78,10 @@ const ROUTES = [
 
   ['POST /api/live-feeds', ['live.manage'], async () => ({ body: { name: 'Feed', input: 'rtmp', port: nextPort(), enabled: false } })],
   ['PATCH /api/live-feeds/:id', ['live.manage'], async ({ admin }) => ({ id: await newFeed(admin), body: { name: 'Renamed' } })],
+
+  ['POST /api/slide-templates', ['settings.manage'], async () => ({ body: { name: unique('Template '), style: { textColor: '#ffffff' } } })],
+  ['PATCH /api/slide-templates/:id', ['settings.manage'], async ({ admin }) => ({ id: await newTemplate(admin), body: { name: unique('Renamed ') } })],
+  ['DELETE /api/slide-templates/:id', ['settings.manage'], async ({ admin }) => ({ id: await newTemplate(admin) })],
 ];
 
 let port = 20000 + (process.pid % 20000);
@@ -123,6 +127,11 @@ async function newPdf(who, admin, withPage = false) {
 }
 async function newFeed(admin) {
   const r = await admin.post('/api/live-feeds', { name: 'Feed', input: 'rtmp', port: nextPort(), enabled: false });
+  assert.equal(r.status, 200, JSON.stringify(r.data));
+  return r.data.id;
+}
+async function newTemplate(admin) {
+  const r = await admin.post('/api/slide-templates', { name: unique('Spare template '), style: {} });
   assert.equal(r.status, 200, JSON.stringify(r.data));
   return r.data.id;
 }

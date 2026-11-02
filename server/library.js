@@ -11,7 +11,7 @@ const ids = (mediaIds) => JSON.stringify(mediaIds);
 // that refers to a library item, like a background image in the announcement designer, adds its
 // references here and to `inUse`, and every one of those screens follows.
 export function mediaUsage(db, mediaIds, now = Date.now()) {
-  const usage = new Map(mediaIds.map((id) => [id, { channels: [], overrides: [], inUse: false }]));
+  const usage = new Map(mediaIds.map((id) => [id, { channels: [], overrides: [], backgrounds: [], inUse: false }]));
   if (!mediaIds.length) return usage;
   const list = ids(mediaIds);
 
@@ -34,7 +34,26 @@ export function mediaUsage(db, mediaIds, now = Date.now()) {
     usage.get(o.media_id).overrides.push({ id: o.id, allChannels: !!o.all_channels, channels });
   }
 
-  for (const u of usage.values()) u.inUse = u.channels.length > 0 || u.overrides.length > 0;
+  // Pictures chosen as a background in the announcement designer.
+  for (const r of db.all(
+    `SELECT id, name, json_extract(style, '$.image') AS image FROM media
+     WHERE json_valid(style) AND json_extract(style, '$.image') IN (SELECT value FROM json_each(?))
+     ORDER BY name COLLATE NOCASE`,
+    list,
+  )) usage.get(r.image)?.backgrounds.push(r.name);
+  for (const r of db.all(
+    `SELECT name, json_extract(style, '$.image') AS image FROM slide_templates
+     WHERE json_valid(style) AND json_extract(style, '$.image') IN (SELECT value FROM json_each(?))`,
+    list,
+  )) usage.get(r.image)?.backgrounds.push(`Template: ${r.name}`);
+  for (const r of db.all(
+    `SELECT title, json_extract(style, '$.image') AS image FROM overrides
+     WHERE cleared_at IS NULL AND (ends_at IS NULL OR ends_at > ?) AND json_valid(style)
+       AND json_extract(style, '$.image') IN (SELECT value FROM json_each(?))`,
+    now, list,
+  )) usage.get(r.image)?.backgrounds.push(`Active override: ${r.title ?? 'Announcement'}`);
+
+  for (const u of usage.values()) u.inUse = u.channels.length > 0 || u.overrides.length > 0 || u.backgrounds.length > 0;
   return usage;
 }
 
@@ -60,7 +79,8 @@ export function deleteBlock(db, live, user, m) {
 // Deletes one item and its files. The caller tells the TVs and admin screens afterwards.
 export async function removeMedia({ db, live, mediaDir }, m) {
   const channels = db.all('SELECT DISTINCT channel_id FROM playlist_items WHERE media_id = ?', m.id).map((c) => c.channel_id);
-  const wasOverride = !!db.get('SELECT 1 AS x FROM overrides WHERE media_id = ? AND cleared_at IS NULL', m.id);
+  // Any text slide or override might use a deleted picture as its background, so images update every channel.
+  const wasOverride = m.type === 'image' || !!db.get('SELECT 1 AS x FROM overrides WHERE media_id = ? AND cleared_at IS NULL', m.id);
   await live.remove(m.id);
   db.run('DELETE FROM media WHERE id = ?', m.id);
   await fs.promises.rm(path.join(mediaDir, m.id), { recursive: true, force: true });

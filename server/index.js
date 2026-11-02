@@ -26,6 +26,7 @@ import overrideRoutes from './routes/overrides.js';
 import settingsRoutes from './routes/settings.js';
 import opsRoutes from './routes/ops.js';
 import liveRoutes from './routes/live.js';
+import templateRoutes from './routes/templates.js';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const MAX_UPLOAD = 20 * 1024 ** 3;
@@ -115,6 +116,7 @@ export async function createServer({ dataDir, port = 8080, host = '0.0.0.0', ffm
   await app.register(settingsRoutes, ctx);
   await app.register(opsRoutes, ctx);
   await app.register(liveRoutes, ctx);
+  await app.register(templateRoutes, ctx);
 
   // TVs do not sign in: each one identifies itself and receives only its channel.
   app.register(async (scope) => {
