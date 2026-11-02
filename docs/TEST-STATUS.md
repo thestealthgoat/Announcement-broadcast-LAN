@@ -14,6 +14,7 @@ What has been tested on real setups, and what hasn't. Last updated November 2, 2
 | Playback while the server is stopped, then reconnecting | Desktop browser over a LAN address | Keeps playing, reconnects with no reload |
 | HLS video | Desktop browser, native and through hls.js | Plays |
 | Server: accounts, permissions, conversion, pairing, overrides | Automated tests | Pass |
+| Clearing an ffmpeg left behind by a force kill | Automated test on a Mac, with real ffmpeg and the real command-line server | Cleared at the next start, and the port works again |
 
 ## Not yet tested
 
@@ -24,7 +25,10 @@ What has been tested on real setups, and what hasn't. Last updated November 2, 2
 | Network drop on Fire TV Stick | Not tested |
 | Video with sound on Fire TV Stick | Not tested |
 | Fully Kiosk Browser, and auto-start after a power cut | Not tested |
-| Android kiosk app: not tested on a device | Compiled and unit tested only. It has never run on a device or emulator, so discovery, playback, remote control, recovery, and starting on boot are all unproven |
+| Android kiosk app: not tested on a device | Compiled and unit tested only. It has never run on a device or emulator, so discovery, playback, remote control, recovery, starting on boot, and following a server whose address changes are all unproven |
+| Publishing on a real network | Only tested on loopback between two copies of the mDNS library: real multicast, a second real host using the same name, waking from sleep, and Android's NsdManager reading the server's ID are not tested |
+| Live feeds through hls.js with native fallback, on a TV or Android WebView | Only tested against a stand-in for the browser and hls.js |
+| Clearing a leftover ffmpeg on Windows | Not tested: the Windows command-line lookup has only been checked against a stand-in |
 | Windows installer | Not tested yet |
 | Intel Mac installer | Built and inspected, not run |
 | `.pkg` install to Applications from a browser download | Not tested |
