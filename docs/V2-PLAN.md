@@ -2,7 +2,7 @@
 
 Goal: signs that show the right thing at the right time, run unattended, and can carry a live feed.
 
-Apple signing and notarization come after V2. Live data slides, fill-in templates, PowerPoint import, Roku and Apple TV apps, and per-channel passwords are out of scope.
+Apple signing and notarization come after V2. Live data slides, PowerPoint import, a freeform slide editor, Roku and Apple TV apps, and per-channel passwords are out of scope.
 
 ## Ground rules
 
@@ -53,6 +53,45 @@ A small app for Fire OS and Google TV in `android/`: a fullscreen WebView showin
 - The Back button doesn't exit by accident.
 - Pure logic has unit tests. Auto-start can only be proven on real devices.
 
+## Second wave
+
+These start after sections A to D are merged, because they change the same screens. Migrations continue from `005`.
+
+### E. Announcement designer
+
+A guided designer, not a freeform canvas. Text announcements and quick overrides share one slide format, so both get it.
+
+- **Templates:** built-in looks such as Emergency, Weather, Schedule change, Game day, and General, plus templates admins save themselves.
+- **Controls:** background color, gradient, or library image with a dimming control, text color, font size, alignment, accent, logo position, and an optional countdown to a set time.
+- **Preview:** a live preview that matches the TV, because both use the same rendering code.
+- **Safety:** text auto-fits so that it can't overflow, and low-contrast color choices get a warning.
+- **Override flow:** the Override page offers templates first, so an urgent message still takes seconds.
+- **Not building:** free placement of elements, layers, shapes, and drawing tools. Staff who need that can make it in Canva and upload it.
+
+### F. Transitions
+
+- **More types:** add wipe, zoom, and push in four directions alongside cut, fade, and slide.
+- **Controls:** speed per item, plus a default transition per channel that new items inherit.
+- **Limits:** stay CSS-only and ES5 for older TVs, and fall back to fade where a browser can't do the effect.
+- **Preview:** preview a transition in the admin.
+
+### G. Roles and permissions
+
+Custom roles replace the fixed Admin and Editor pair.
+
+- **Permissions:** separate toggles for managing content, editing channels, uploading, deleting library items, pushing overrides, managing screens, live feeds, branding, and users. Access is limited per channel.
+- **Built-in roles:** Admin, Editor, and Uploader, the last for coaches who only add content. Admins can create more.
+- **Upgrade:** every existing account keeps exactly the access it has today, including the separate override flag. A test proves this on a 1.0.2 database.
+- **Safety:** always keep at least one account with full access, and nobody can grant permissions they don't have. Every route is checked on the server, with a test for each permission.
+
+### H. Library organization
+
+- **Organizing:** folders and tags, search, sort, and filters by type, folder, or status.
+- **Bulk actions:** select several items to move, tag, add to a channel, or delete.
+- **Usage:** show which channels use each item, and warn before deleting one in use.
+- **Cleanup:** a cleanup view of items no channel uses, oldest first, showing the space each would free. Nothing is deleted without confirmation.
+- **Duplicates:** warn when an upload matches a file already in the library.
+
 ## Merge order
 
-A, then C, then B, then D, onto the `v2` branch. Then a full review, every automated check, a scripted browser pass, and installers. The result goes up as a pull request.
+First wave: A, then C, then B, then D, onto the `v2` branch. Second wave: G first because it changes permission checks everywhere, then E, F, and H in parallel. After each wave comes a full review, every automated check, a scripted browser pass, and installers. The result goes up as a pull request.
