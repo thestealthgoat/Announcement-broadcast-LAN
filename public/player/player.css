@@ -5,13 +5,22 @@ html, body { margin: 0; height: 100%; width: 100%; background: #000; overflow: h
 .layer img, .layer video, .layer iframe { position: absolute; top: 0; left: 0; width: 100%; height: 100%; border: 0; background: #000; }
 .layer img, .layer video { -o-object-fit: contain; object-fit: contain; }
 .layer iframe { background: #fff; }
-.text-slide { position: absolute; top: 0; left: 0; width: 100%; height: 100%; box-sizing: border-box; padding: 6vh 7vw;
+.text-slide { position: absolute; top: 0; left: 0; width: 100%; height: 100%; box-sizing: border-box; overflow: hidden; text-align: center; }
+.slide-image, .slide-dim { position: absolute; top: 0; left: 0; width: 100%; height: 100%; }
+.slide-image { background-position: center; background-repeat: no-repeat; -webkit-background-size: cover; background-size: cover; }
+.slide-dim { background: #000; }
+.slide-box { position: absolute; top: 6vh; bottom: 6vh; left: 7vw; right: 7vw; overflow: hidden;
   display: -webkit-box; display: -webkit-flex; display: flex; -webkit-box-orient: vertical; -webkit-flex-direction: column; flex-direction: column;
-  -webkit-justify-content: center; justify-content: center; text-align: center; }
+  -webkit-justify-content: center; justify-content: center; }
+.slide-content { -webkit-flex-shrink: 0; flex-shrink: 0; width: 100%; }
+.text-slide .countdown { margin-top: 3vh; font-size: 6vw; line-height: 1.1; font-weight: 700; }
 .text-slide h1 { margin: 0 0 3vh; font-size: 7vw; line-height: 1.1; font-weight: 700; word-wrap: break-word; }
 .text-slide p { margin: 0; font-size: 3.4vw; line-height: 1.35; white-space: pre-wrap; word-wrap: break-word; opacity: .92; }
 .text-slide .rule { width: 12vw; height: .8vh; margin: 0 auto 4vh; border-radius: .4vh; }
 .text-slide .logo { position: absolute; left: 3vw; bottom: 4vh; max-height: 10vh; max-width: 22vw; width: auto; height: auto; background: transparent; top: auto; }
+.text-slide .logo-bottom-right { left: auto; right: 3vw; }
+.text-slide .logo-top-left { top: 4vh; bottom: auto; }
+.text-slide .logo-top-right { top: 4vh; bottom: auto; left: auto; right: 3vw; }
 .idle { position: absolute; top: 0; left: 0; width: 100%; height: 100%;
   display: -webkit-box; display: -webkit-flex; display: flex; -webkit-box-orient: vertical; -webkit-flex-direction: column; flex-direction: column;
   -webkit-align-items: center; align-items: center; -webkit-justify-content: center; justify-content: center; text-align: center; }

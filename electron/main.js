@@ -4,6 +4,9 @@ import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { createServer } from '../server/index.js';
 import { baseUrls } from '../server/lan.js';
+import { updateMenuItems } from '../server/ops/updates.js';
+import { runRecoveryFlow } from './recovery.js';
+import { quitApp, restartApp } from './restart.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const DEFAULT_PORT = 8080;
@@ -15,6 +18,7 @@ let tray = null;
 let win = null;
 let server = null;
 let port = DEFAULT_PORT;
+let stopping = false;
 
 const dataDir = () => process.env.SIGNAGE_DATA_DIR ?? app.getPath('userData');
 const adminUrl = () => `${baseUrls(port)[0]}/admin/`;
@@ -58,12 +62,22 @@ function showWindow() {
   });
 }
 
+async function recoverAdmin() {
+  app.focus({ steal: true }); // the app has no Dock icon, so dialogs can open behind other windows
+  try {
+    await runRecoveryFlow({ server, dialog, clipboard });
+  } catch (err) {
+    dialog.showErrorBox('Could not reset the password', err.message);
+  }
+}
+
 function autostartAllowed() {
   return app.isPackaged && !process.env.SIGNAGE_NO_AUTOSTART;
 }
 
 function buildMenu() {
   const items = [
+    ...updateMenuItems(server.ops.availableUpdate(), (url) => shell.openExternal(url)),
     { label: 'Show address and QR code', click: showWindow },
     { label: 'Open admin', click: () => shell.openExternal(adminUrl()) },
     { label: `Copy TV address (${tvUrl()})`, click: () => clipboard.writeText(tvUrl()) },
@@ -77,6 +91,7 @@ function buildMenu() {
       click: (item) => app.setLoginItemSettings({ openAtLogin: item.checked }),
     });
   }
+  items.push({ label: 'Reset admin password…', click: recoverAdmin });
   items.push({ label: 'Open data folder', click: () => shell.openPath(dataDir()) });
   items.push({ type: 'separator' }, { label: 'Quit Network Signage', click: () => app.quit() });
   tray.setContextMenu(Menu.buildFromTemplate(items));
@@ -113,9 +128,18 @@ async function main() {
   await app.whenReady();
   app.dock?.hide();
   fs.mkdirSync(dataDir(), { recursive: true });
-  port = readPort();
 
-  server = await createServer({ dataDir: dataDir(), port, logger: { level: 'warn' } });
+  // The port is read after any restore goes in, since a restore brings its own config.json.
+  server = await createServer({
+    dataDir: dataDir(),
+    port: () => (port = readPort()),
+    logger: { level: 'warn' },
+    restartsItself: true,
+    onRestart: () => {
+      stopping = true;
+      return restartApp({ app, server });
+    },
+  });
   try {
     await server.start();
   } catch (err) {
@@ -132,12 +156,11 @@ async function main() {
   createTray();
   if (firstRun || !app.isPackaged) showWindow();
 
-  let stopping = false;
   app.on('before-quit', (event) => {
     if (stopping) return;
     stopping = true;
     event.preventDefault();
-    server.stop().catch(() => {}).finally(() => app.exit(0));
+    quitApp({ app, server });
   });
 }
 

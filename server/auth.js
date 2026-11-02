@@ -1,5 +1,6 @@
 import { randomBytes, scrypt, timingSafeEqual, createHash } from 'node:crypto';
 import { promisify } from 'node:util';
+import { getRole, hasPermission, isFullAccess, legacyColumns } from './permissions.js';
 
 const scryptAsync = promisify(scrypt);
 const SESSION_MS = 30 * 24 * 60 * 60 * 1000;
@@ -8,6 +9,9 @@ export const COOKIE = 'signage_session';
 export function httpError(statusCode, message) {
   return Object.assign(new Error(message), { statusCode });
 }
+
+// For a 5xx whose message is useful to the person, which the error handler would otherwise hide.
+export const plainError = (statusCode, message) => Object.assign(httpError(statusCode, message), { expose: true });
 
 export async function hashPassword(password) {
   const salt = randomBytes(16);
@@ -50,13 +54,22 @@ export function userFromToken(db, token) {
   return row ? publicUser(db, row) : null;
 }
 
+// `role` and `canOverride` describe the permissions for older API clients. Nothing decides access from them.
 export function publicUser(db, row) {
+  const role = row.role_id ? getRole(db, row.role_id) : null;
+  const permissions = role?.permissions ?? [];
+  const legacy = legacyColumns(permissions);
   return {
     id: row.id,
     username: row.username,
     name: row.name,
-    role: row.role,
-    canOverride: row.role === 'admin' || !!row.can_override,
+    roleId: role?.id ?? null,
+    roleName: role?.name ?? null,
+    permissions,
+    fullAccess: isFullAccess(permissions),
+    allChannels: permissions.includes('channels.all'),
+    role: legacy.role,
+    canOverride: !!legacy.canOverride,
     channelIds: db
       .all('SELECT channel_id FROM user_channels WHERE user_id = ?', row.id)
       .map((r) => r.channel_id),
@@ -67,27 +80,64 @@ export const requireUser = async (req) => {
   if (!req.user) throw httpError(401, 'Please sign in.');
 };
 
-export const requireAdmin = async (req) => {
+// Passes if the person holds any one of the listed permissions.
+export const requirePermission = (...keys) => async (req) => {
   if (!req.user) throw httpError(401, 'Please sign in.');
-  if (req.user.role !== 'admin') throw httpError(403, 'Only admins can do that.');
+  if (!keys.some((k) => hasPermission(req.user, k))) throw httpError(403, 'You do not have permission to do that.');
 };
 
-export const requireOverride = async (req) => {
+// For what no single permission covers, because it reaches everything.
+export const requireFullAccess = async (req) => {
   if (!req.user) throw httpError(401, 'Please sign in.');
-  if (!req.user.canOverride) throw httpError(403, 'You do not have override permission.');
+  if (!req.user.fullAccess) throw httpError(403, 'You do not have permission to do that.');
 };
 
-export function canEditChannel(user, channelId) {
-  return user.role === 'admin' || user.channelIds.includes(channelId);
+export function canAccessChannel(user, channelId) {
+  return hasPermission(user, 'channels.all') || user.channelIds.includes(channelId);
 }
 
-// A library item is shared, so an editor may change it only if every channel
-// using it is one of theirs.
+export const canEditChannel = (user, channelId) => hasPermission(user, 'channels.edit') && canAccessChannel(user, channelId);
+export const canAddToChannel = (user, channelId) => hasPermission(user, 'channels.add') && canAccessChannel(user, channelId);
+export const canManageChannel = (user, channelId) => hasPermission(user, 'channels.manage') && canAccessChannel(user, channelId);
+
+// Is it on any override showing now? Directly, or as the background of one, or as the background of
+// a slide that one shows. Answers with the overrides.
+function activeOverridesShowing(db, list, mediaId) {
+  return db.all(
+    `SELECT id, all_channels FROM overrides
+     WHERE cleared_at IS NULL AND (ends_at IS NULL OR ends_at > ?)
+       AND (media_id IN (SELECT value FROM json_each(?))
+            OR (json_valid(style) AND json_extract(style, '$.image') = ?))`,
+    Date.now(), list, mediaId,
+  );
+}
+
+// A library item is shared, so it can only be changed if every channel showing it is one of theirs.
+// That counts a picture used as a slide's background, and anything on an override that's up now, and
+// an override on every channel takes the channels.all permission. Keep to the same idea of "using"
+// as mediaUsage in library.js.
+export function mediaInScope(db, user, mediaId) {
+  if (hasPermission(user, 'channels.all')) return true;
+  const slides = db.all(
+    "SELECT id FROM media WHERE style IS NOT NULL AND json_valid(style) AND json_extract(style, '$.image') = ?",
+    mediaId,
+  ).map((r) => r.id);
+  const list = JSON.stringify([mediaId, ...slides]);
+  const placed = db.all(
+    'SELECT DISTINCT channel_id FROM playlist_items WHERE media_id IN (SELECT value FROM json_each(?))',
+    list,
+  ).map((r) => r.channel_id);
+  if (!placed.every((id) => user.channelIds.includes(id))) return false;
+  return activeOverridesShowing(db, list, mediaId).every((o) => !o.all_channels && db
+    .all('SELECT channel_id FROM override_channels WHERE override_id = ?', o.id)
+    .every((r) => user.channelIds.includes(r.channel_id)));
+}
+
 export function canEditMedia(db, user, mediaId) {
-  if (user.role === 'admin') return true;
-  return db
-    .all('SELECT DISTINCT channel_id FROM playlist_items WHERE media_id = ?', mediaId)
-    .every((r) => user.channelIds.includes(r.channel_id));
+  if (!mediaInScope(db, user, mediaId)) return false;
+  if (hasPermission(user, 'library.edit')) return true;
+  return hasPermission(user, 'library.own')
+    && db.get('SELECT created_by FROM media WHERE id = ?', mediaId)?.created_by === user.id;
 }
 
 // Small in-memory limiter for sign-in attempts.
@@ -106,5 +156,6 @@ export function createLoginLimiter({ max = 10, windowMs = 5 * 60 * 1000 } = {}) 
       else h.count += 1;
     },
     reset: (key) => hits.delete(key),
+    clear: () => hits.clear(),
   };
 }

@@ -1,20 +1,36 @@
 import { randomInt } from 'node:crypto';
 import { VERSION } from './version.js';
+import { wallClock } from './schedule.js';
+import { parseStyle, resolveStyle, styleKey } from './slide-style.js';
+import { DEFAULT_MS, resolve } from './transitions.js';
 
 const PING_MS = 15000;
 const DEAD_MS = 45000;
 const DEFAULT_STILL_SECONDS = 10;
 const DEFAULT_LIVE_SECONDS = 60;
 
+// A playlist row's schedule, or null when it runs all the time.
+function scheduleOf(r) {
+  if (r.start_date === null && r.end_date === null && r.start_time === null && r.end_time === null && r.days === null) return null;
+  return { startDate: r.start_date, endDate: r.end_date, startTime: r.start_time, endTime: r.end_time, days: r.days };
+}
+
+// A text slide's key and style. A slide with no style keeps the key it has always had.
+function styled(key, style) {
+  return style ? { key: `${key}:${styleKey(style)}`, style } : { key };
+}
+
 // Turns one library item into the slides a player shows. A PDF becomes one slide per page.
-export function toSlides(media, placement) {
+export function toSlides(media, placement, styleOf = parseStyle) {
   const base = {
     mediaId: media.id,
     type: media.type,
     name: media.name,
     transition: placement.transition ?? 'fade',
+    transitionMs: placement.transitionMs ?? DEFAULT_MS,
     audio: !!placement.audio,
     size: media.size ?? null,
+    schedule: placement.schedule ?? null,
   };
   const key = `${placement.key}:${media.id}:${media.rev}`;
   const still = placement.duration ?? DEFAULT_STILL_SECONDS;
@@ -39,13 +55,15 @@ export function toSlides(media, placement) {
     case 'hls':
       return [{ ...base, key, src: media.url, duration: placement.duration ?? DEFAULT_LIVE_SECONDS }];
     case 'text':
-      return [{ ...base, key, title: media.title ?? '', body: media.body ?? '', duration: still }];
+      return [{ ...base, ...styled(key, styleOf(media.style)), title: media.title ?? '', body: media.body ?? '', duration: still }];
     default:
       return [];
   }
 }
 
-export function createHub(db, log) {
+// isAvailable says whether a library item can be shown right now. Only a local
+// live feed that is down answers no.
+export function createHub(db, log, isAvailable = () => true) {
   const players = new Set();
   const admins = new Set();
   let expiryTimer = null;
@@ -55,6 +73,7 @@ export function createHub(db, log) {
   const send = (socket, msg) => {
     if (socket.readyState === 1) socket.send(JSON.stringify(msg));
   };
+  const styleOf = (json) => resolveStyle(db, json);
 
   function activeOverrides() {
     const now = Date.now();
@@ -77,10 +96,13 @@ export function createHub(db, log) {
       if (o.media_id) {
         const media = db.get("SELECT * FROM media WHERE id = ? AND status = 'ready'", o.media_id);
         if (!media) continue;
-        slides = toSlides(media, placement);
+        slides = isAvailable(media.id) ? toSlides(media, placement, styleOf) : [{
+          key: `o${o.id}:waiting`, mediaId: media.id, type: 'text', name: media.name,
+          title: 'Waiting for the live feed', body: '', transition: 'cut', audio: false, duration: DEFAULT_STILL_SECONDS,
+        }];
       } else {
         slides = [{
-          key: `o${o.id}`, mediaId: null, type: 'text', name: o.title || 'Announcement',
+          ...styled(`o${o.id}`, styleOf(o.style)), mediaId: null, type: 'text', name: o.title || 'Announcement',
           title: o.title ?? '', body: o.body ?? '', transition: 'cut', audio: false, duration: DEFAULT_STILL_SECONDS,
         }];
       }
@@ -91,18 +113,22 @@ export function createHub(db, log) {
 
   function channelState(channel) {
     const rows = db.all(
-      `SELECT p.id AS pid, p.duration AS p_duration, p.transition, p.audio, m.*
+      `SELECT p.id AS pid, p.duration AS p_duration, p.transition, p.transition_style, p.transition_ms, p.audio,
+              p.start_date, p.end_date, p.start_time, p.end_time, p.days, m.*
        FROM playlist_items p JOIN media m ON m.id = p.media_id
        WHERE p.channel_id = ? AND p.enabled = 1 AND m.status = 'ready'
        ORDER BY p.position, p.id`,
       channel.id,
     );
-    const slides = rows.flatMap((r) =>
-      toSlides(r, { key: `p${r.pid}`, duration: r.p_duration, transition: r.transition, audio: r.audio }),
-    );
+    const channelDefault = { style: channel.default_transition_style, ms: channel.default_transition_ms };
+    const slides = rows.filter((r) => isAvailable(r.id)).flatMap((r) => {
+      const { style, ms } = resolve({ style: r.transition_style, ms: r.transition_ms }, channelDefault, r.transition);
+      return toSlides(r, { key: `p${r.pid}`, duration: r.p_duration, transition: style, transitionMs: ms, audio: r.audio, schedule: scheduleOf(r) }, styleOf);
+    });
     return {
       type: 'state',
       version: VERSION,
+      clock: wallClock(),
       channel: { id: channel.id, slug: channel.slug, name: channel.name },
       slides,
       override: overrideFor(channel.id),
@@ -199,18 +225,21 @@ export function createHub(db, log) {
       send(conn.socket, { type: 'pair', code, branding: db.branding(), version: VERSION });
     }
     adminRefresh('screens');
+    adminRefresh('notices');
   }
 
   function heartbeat(conn, msg) {
     if (!conn.deviceId) return;
     const item = typeof msg.item === 'string' ? msg.item.slice(0, 200) : null;
     db.run('UPDATE screens SET last_seen = ?, current_item = ? WHERE id = ?', Date.now(), item, conn.deviceId);
-    if (item !== conn.item) adminRefresh('screens');
+    const cacheFull = msg.cacheFull === true;
+    if (item !== conn.item || cacheFull !== conn.cacheFull) adminRefresh('screens');
     conn.item = item;
+    conn.cacheFull = cacheFull;
   }
 
   function addPlayer(socket) {
-    const conn = { socket, channelId: null, deviceId: null, preview: false, item: null, lastMessage: Date.now() };
+    const conn = { socket, channelId: null, deviceId: null, preview: false, item: null, cacheFull: false, lastMessage: Date.now() };
     players.add(conn);
     socket.on('message', (raw) => {
       conn.lastMessage = Date.now();
@@ -242,9 +271,11 @@ export function createHub(db, log) {
 
   const ticker = setInterval(() => {
     const now = Date.now();
+    // Pings carry the clock so TVs stay in step across daylight saving and clock changes.
+    const clock = wallClock();
     for (const p of players) {
       if (now - p.lastMessage > DEAD_MS) p.socket.terminate();
-      else send(p.socket, { type: 'ping' });
+      else send(p.socket, { type: 'ping', clock });
     }
     for (const a of admins) send(a, { type: 'ping' });
   }, PING_MS);
@@ -270,6 +301,7 @@ export function createHub(db, log) {
     addPlayer, addAdmin, pushChannel, pushAll, pushMedia, adminRefresh, assignScreen,
     activeOverrides, overrideChannelIds, scheduleOverrideExpiry,
     isOnline: (deviceId) => [...players].some((p) => p.deviceId === deviceId),
+    isCacheFull: (deviceId) => [...players].some((p) => p.deviceId === deviceId && p.cacheFull),
     closeAll() {
       clearInterval(ticker);
       clearTimeout(expiryTimer);

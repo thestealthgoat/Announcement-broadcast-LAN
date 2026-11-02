@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { randomUUID } from 'node:crypto';
 import Fastify from 'fastify';
 import fastifyStatic from '@fastify/static';
 import multipart from '@fastify/multipart';
@@ -9,18 +10,33 @@ import cookie from '@fastify/cookie';
 import { openDb } from './db.js';
 import { createHub } from './hub.js';
 import { createProcessor, resolveFfmpeg } from './media.js';
+import { createLiveFeeds } from './live/supervisor.js';
+import { createHashBackfill, sweepOrphanFolders } from './library.js';
 import { isLocalAddress, baseUrls } from './lan.js';
-import { userFromToken, httpError, COOKIE } from './auth.js';
+import { userFromToken, httpError, createLoginLimiter, COOKIE } from './auth.js';
+import { listAdmins, resetAdminPassword } from './recovery.js';
+import { createOps } from './ops/index.js';
+import { applyPendingRestore, finishRestore, undoRestore, LAST_RESTORE_KEY } from './backup/swap.js';
+import { EXPORT_TMP_DIR } from './backup/layout.js';
 import authRoutes from './routes/auth.js';
 import userRoutes from './routes/users.js';
+import roleRoutes from './routes/roles.js';
 import channelRoutes from './routes/channels.js';
 import mediaRoutes from './routes/media.js';
+import libraryRoutes from './routes/library.js';
 import screenRoutes from './routes/screens.js';
 import overrideRoutes from './routes/overrides.js';
 import settingsRoutes from './routes/settings.js';
+import opsRoutes from './routes/ops.js';
+import liveRoutes from './routes/live.js';
+import templateRoutes from './routes/templates.js';
+import backupRoutes from './routes/backup.js';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const MAX_UPLOAD = 20 * 1024 ** 3;
+const MAX_BACKUP = 4 * 1024 ** 4; // Far past any real library, but still a limit on an upload anyone can reach during first-run.
+const STOP_GRACE_MS = 3000; // long enough for an ordinary request to finish
+const STOP_CUT_POLL_MS = 250;
 
 const VENDOR = {
   'hls.min.js': 'hls.js/dist/hls.min.js',
@@ -44,14 +60,56 @@ const ADMIN_CSP = [
   "form-action 'self'",
 ].join('; ');
 
-export async function createServer({ dataDir, port = 8080, host = '0.0.0.0', ffmpeg = resolveFfmpeg(), logger = false }) {
+// Opens the database, and is what decides whether a restore that just went in place stays there.
+function openAfterRestore(dataDir, restore, log) {
+  const file = path.join(dataDir, 'signage.db');
+  let result = restore.result ?? null;
+  let db = null;
+  if (restore.state === 'applied') {
+    try {
+      db = openDb(file);
+      db.get('SELECT 1 AS x FROM users LIMIT 1');
+      result = finishRestore(dataDir, restore.marker, { log });
+    } catch (err) {
+      try {
+        db?.close();
+      } catch {}
+      db = null;
+      log.error({ err: err.message }, 'A restored database would not open');
+      result = undoRestore(dataDir, restore.marker, err.message);
+    }
+  }
+  db ??= openDb(file);
+  if (result) db.setSetting(LAST_RESTORE_KEY, result);
+  return db;
+}
+
+// `port` can be a function, for when the port comes from a file in the data folder, because a
+// restore can replace that file. `onRestart` runs after a restore is accepted. It should stop the
+// server and start it again, and `restartsItself` says whether it can do that without help.
+export async function createServer({ dataDir, port: portOption = 8080, host = '0.0.0.0', ffmpeg = resolveFfmpeg(), logger = false, ops: opsDeps = {}, hashBackfillDelayMs, onRestart = null, restartsItself = false }) {
+  fs.mkdirSync(dataDir, { recursive: true });
+  // First, because nothing may have the database open while its files change.
+  const restore = applyPendingRestore(dataDir);
+  try {
+    fs.rmSync(path.join(dataDir, EXPORT_TMP_DIR), { recursive: true, force: true, maxRetries: 3, retryDelay: 100 }); // from a crash
+  } catch {} // Something has a file open. It does no harm, and the next start tries again.
+  const port = typeof portOption === 'function' ? portOption() : portOption;
   const mediaDir = path.join(dataDir, 'media');
   fs.mkdirSync(mediaDir, { recursive: true });
 
   const app = Fastify({ logger, bodyLimit: 1024 * 1024 });
-  const db = openDb(path.join(dataDir, 'signage.db'));
-  const hub = createHub(db, app.log);
+  // test/permissions.test.js uses this to prove every route that changes something is checked.
+  const routes = [];
+  app.addHook('onRoute', (r) => {
+    for (const method of [r.method].flat()) routes.push({ method, url: r.url });
+  });
+  const db = openAfterRestore(dataDir, restore, app.log);
+  const backup = { restoring: false, restarting: false };
+  const hub = createHub(db, app.log, (mediaId) => live.isAvailable(mediaId));
   const processor = createProcessor({ db, hub, mediaDir, ffmpeg, log: app.log });
+  const live = createLiveFeeds({ db, hub, dataDir, ffmpeg, log: app.log });
+  const hashBackfill = createHashBackfill({ db, mediaDir, isBusy: processor.busy, log: app.log, startDelayMs: hashBackfillDelayMs });
 
   app.decorateRequest('user', null);
   await app.register(cookie);
@@ -74,6 +132,11 @@ export async function createServer({ dataDir, port = 8080, host = '0.0.0.0', ffm
         } catch {}
         if (originHost !== req.headers.host) throw httpError(403, 'Cross-site requests are not allowed.');
       }
+      // Anything saved now would be lost in the swap, so it's better refused.
+      if (backup.restarting) {
+        reply.code(503).send({ error: 'The server is restarting to finish a restore. Try again in a moment.' });
+        return reply;
+      }
     }
     req.user = userFromToken(db, req.cookies?.[COOKIE]);
   });
@@ -82,18 +145,29 @@ export async function createServer({ dataDir, port = 8080, host = '0.0.0.0', ffm
     const status = err.statusCode ?? 500;
     if (err.code === 'FST_REQ_FILE_TOO_LARGE') return reply.code(413).send({ error: 'That file is too large.' });
     if (status >= 500) req.log.error(err);
-    return reply.code(status).send({ error: status >= 500 ? 'Something went wrong on the server.' : err.message });
+    return reply.code(status).send({ error: status >= 500 && !err.expose ? 'Something went wrong on the server.' : err.message });
   });
 
   const portRef = () => app.server.address()?.port ?? port;
-  const ctx = { db, hub, processor, mediaDir, port: portRef };
+  const limiter = createLoginLimiter();
+  const ops = createOps({ db, hub, dataDir, port: portRef, host, log: app.log, deps: opsDeps });
+  const ctx = {
+    db, hub, processor, mediaDir, port: portRef, limiter, ops, live, dataDir, backup, onRestart, restartsItself,
+    maxUpload: MAX_BACKUP, statfs: opsDeps.statfs ?? fs.promises.statfs, bootId: randomUUID(),
+  };
   await app.register(authRoutes, ctx);
   await app.register(userRoutes, ctx);
+  await app.register(roleRoutes, ctx);
   await app.register(channelRoutes, ctx);
   await app.register(mediaRoutes, ctx);
+  await app.register(libraryRoutes, ctx);
   await app.register(screenRoutes, ctx);
   await app.register(overrideRoutes, ctx);
   await app.register(settingsRoutes, ctx);
+  await app.register(opsRoutes, ctx);
+  await app.register(liveRoutes, ctx);
+  await app.register(templateRoutes, ctx);
+  await app.register(backupRoutes, ctx);
 
   // TVs do not sign in: each one identifies itself and receives only its channel.
   app.register(async (scope) => {
@@ -116,6 +190,20 @@ export async function createServer({ dataDir, port = 8080, host = '0.0.0.0', ffm
     immutable: true,
     maxAge: '365d',
   });
+  // Live video changes every second, so nothing here may be cached or revalidated.
+  await app.register(fastifyStatic, {
+    root: live.liveDir,
+    prefix: '/live/',
+    decorateReply: false,
+    cacheControl: false,
+    etag: false,
+    lastModified: false,
+    setHeaders: (reply, file) => {
+      reply.header('Cache-Control', 'no-store');
+      if (file.endsWith('.m3u8')) reply.header('Content-Type', 'application/vnd.apple.mpegurl');
+      else if (file.endsWith('.ts')) reply.header('Content-Type', 'video/mp2t');
+    },
+  });
 
   const sendPlayer = (req, reply) => reply.sendFile('player/index.html');
   app.get('/', (req, reply) => reply.redirect('/admin/'));
@@ -136,21 +224,53 @@ export async function createServer({ dataDir, port = 8080, host = '0.0.0.0', ffm
   });
 
   app.addHook('onClose', async () => {
+    await hashBackfill.stop();
+    await ops.stop();
+    await live.stop();
     processor.stop();
     hub.closeAll();
   });
 
+  let stopping = null;
   return {
-    app, db, hub, processor,
+    app, db, hub, processor, ops, live, routes, hashBackfill,
+    listAdmins: () => listAdmins(db),
+    async resetAdminPassword(userId) {
+      const temp = await resetAdminPassword(db, userId);
+      limiter.clear(); // being locked out is usually why someone is here
+      return temp;
+    },
     async start() {
+      // Not on the boot a restore was dealt with, when the folders just changed underneath this.
+      if (restore.state === 'none') await sweepOrphanFolders({ db, mediaDir, log: app.log });
       await app.listen({ port, host });
       processor.resume();
+      live.start();
+      hashBackfill.start();
       hub.scheduleOverrideExpiry();
+      ops.start(); // Not awaited: a slow check must never hold up serving.
       return { port: portRef(), urls: baseUrls(portRef()) };
     },
-    async stop() {
-      await app.close();
-      db.close();
+    // A TV partway through a video, or a half-sent upload, would otherwise hold this open for as long
+    // as it likes, and whatever is quitting would wait on it. They get a short grace period, then
+    // they're cut off. It repeats because connections are still accepted until closing gets that far.
+    stop() {
+      stopping ??= (async () => {
+        const started = Date.now();
+        const cutter = setInterval(() => {
+          if (Date.now() - started >= STOP_GRACE_MS) {
+            app.server.closeAllConnections?.();
+            hub.closeAll(); // upgraded sockets aren't connections to closeAllConnections
+          }
+        }, STOP_CUT_POLL_MS);
+        try {
+          await app.close();
+        } finally {
+          clearInterval(cutter);
+          db.close();
+        }
+      })();
+      return stopping;
     },
   };
 }

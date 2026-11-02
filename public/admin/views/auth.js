@@ -1,4 +1,16 @@
 import { h, api, field } from '../lib.js';
+import { firstRunRestore, RESTORED_FLAG } from './backup.js';
+
+// Set by the restore page just before it reloads, and shown once.
+function justRestored() {
+  try {
+    const set = sessionStorage.getItem(RESTORED_FLAG);
+    sessionStorage.removeItem(RESTORED_FLAG);
+    return !!set;
+  } catch {
+    return false;
+  }
+}
 
 function form(onSubmit, ...children) {
   const error = h('p', { class: 'err', hidden: true, role: 'alert' });
@@ -38,6 +50,7 @@ export function setupView(root, done) {
       field('Password (8 or more characters)', password),
       h('button', { type: 'submit', class: 'primary', style: 'width:100%' }, 'Finish setup'),
     ),
+    firstRunRestore(),
   )));
   org.focus();
 }
@@ -48,6 +61,7 @@ export function loginView(root, branding, done) {
   root.replaceChildren(h('div', { class: 'center' }, h('div', { class: 'card' },
     branding.logo && h('img', { class: 'logo', src: branding.logo, alt: '' }),
     h('h1', { style: 'margin-bottom:1rem' }, branding.orgName),
+    justRestored() && h('p', { class: 'small', role: 'status' }, 'Your backup was restored. Sign in with an account from the backup.'),
     form(
       async () => {
         await api.post('/api/login', { username: username.value, password: password.value });
@@ -57,7 +71,7 @@ export function loginView(root, branding, done) {
       field('Password', password),
       h('button', { type: 'submit', class: 'primary', style: 'width:100%' }, 'Sign in'),
     ),
-    h('p', { class: 'muted small', style: 'margin:.75rem 0 0' }, 'Need an account? Ask your admin.'),
+    h('p', { class: 'muted small', style: 'margin:.75rem 0 0' }, 'Need an account or a new password? Ask your admin. Admins can reset theirs on the signage computer: use the tray menu, then Reset admin password.'),
   )));
   username.focus();
 }

@@ -1,4 +1,8 @@
 import { DatabaseSync } from 'node:sqlite';
+import fs from 'node:fs';
+import { fileURLToPath } from 'node:url';
+
+const MIGRATIONS_DIR = fileURLToPath(new URL('./migrations/', import.meta.url));
 
 const SCHEMA = `
 CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -96,9 +100,48 @@ export const DEFAULT_BRANDING = {
   fontFile: null,
 };
 
+// Schema upgrades are numbered files, like 002-schedule.sql, applied once in order.
+// Each runs in a transaction, so a failed upgrade leaves the database as it was.
+export function pendingMigrations(version, dir = MIGRATIONS_DIR) {
+  return fs.readdirSync(dir)
+    .map((name) => ({ name, number: Number(name.match(/^(\d+)-.*\.sql$/)?.[1]) }))
+    .filter((m) => m.number > version)
+    .sort((a, b) => a.number - b.number);
+}
+
+export const latestSchemaVersion = (dir = MIGRATIONS_DIR) => Math.max(1, ...pendingMigrations(0, dir).map((m) => m.number));
+
+function migrate(raw, db) {
+  let { user_version: version } = raw.prepare('PRAGMA user_version').get();
+  if (version === 0) {
+    raw.exec('BEGIN');
+    raw.exec(SCHEMA);
+    raw.exec('PRAGMA user_version = 1');
+    raw.exec('COMMIT');
+    db.run("INSERT INTO channels (slug, name, created_at) VALUES ('main', 'Main', ?)", Date.now());
+    version = 1;
+  }
+  for (const m of pendingMigrations(version)) {
+    raw.exec('BEGIN');
+    try {
+      raw.exec(fs.readFileSync(MIGRATIONS_DIR + m.name, 'utf8'));
+      raw.exec(`PRAGMA user_version = ${m.number}`);
+      raw.exec('COMMIT');
+    } catch (err) {
+      raw.exec('ROLLBACK');
+      throw new Error(`Database upgrade ${m.name} failed: ${err.message}`);
+    }
+  }
+}
+
 export function openDb(file) {
   const raw = new DatabaseSync(file);
-  raw.exec('PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000;');
+  try {
+    raw.exec('PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000;');
+  } catch (err) {
+    raw.close();
+    throw err;
+  }
 
   const cache = new Map();
   const stmt = (sql) => {
@@ -136,16 +179,11 @@ export function openDb(file) {
     branding: () => ({ ...DEFAULT_BRANDING, ...db.getSetting('branding', {}) }),
   };
 
-  const { user_version: version } = raw.prepare('PRAGMA user_version').get();
-  if (version === 0) {
-    raw.exec('BEGIN');
-    raw.exec(SCHEMA);
-    raw.exec('PRAGMA user_version = 1');
-    raw.exec('COMMIT');
-    db.run(
-      "INSERT INTO channels (slug, name, created_at) VALUES ('main', 'Main', ?)",
-      Date.now(),
-    );
+  try {
+    migrate(raw, db);
+  } catch (err) {
+    raw.close(); // a restore that fails here moves this file next, and Windows needs it closed
+    throw err;
   }
   return db;
 }

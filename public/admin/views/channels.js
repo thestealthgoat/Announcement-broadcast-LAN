@@ -1,12 +1,12 @@
 import { h, api, guard, field, checkbox, toast, openDialog, thumb, TYPE_LABEL } from '../lib.js';
+import { transitionSettings } from './transitionSettings.js';
 
 export async function channelsView(main, ctx) {
-  const isAdmin = ctx.me.role === 'admin';
   const listEl = h('div', { class: 'list' });
 
   async function refresh() {
     const channels = await api.get('/api/channels');
-    const visible = channels.filter((c) => c.canEdit);
+    const visible = channels.filter((c) => c.canAdd || c.canEdit || c.canManage);
     listEl.replaceChildren(...(visible.length
       ? visible.map((c) => h('a', { class: 'tile', href: `#/channels/${c.id}` },
           h('div', { class: 'grow' },
@@ -20,7 +20,7 @@ export async function channelsView(main, ctx) {
 
   main.replaceChildren(
     h('div', { class: 'page-head' }, h('h1', {}, 'Channels'),
-      isAdmin && h('button', {
+      ctx.can('channels.manage') && h('button', {
         class: 'primary',
         onclick: () => openDialog('New channel', (close) => {
           const name = h('input', { type: 'text', required: true, placeholder: 'Gym Lobby' });
@@ -49,6 +49,11 @@ export async function channelsView(main, ctx) {
   return { refresh: (s) => s.includes('channels') && guard(refresh) };
 }
 
+const DAY_NAMES = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+const ALL_DAYS = 127;
+const STATUS_LABEL = { on: 'On now', scheduled: 'Scheduled', ended: 'Ended' };
+const STATUS_REFRESH_MS = 30000;
+
 function formatDuration(seconds) {
   if (!seconds) return '';
   const m = Math.floor(seconds / 60);
@@ -57,10 +62,9 @@ function formatDuration(seconds) {
 }
 
 export async function channelView(main, ctx, id) {
-  const isAdmin = ctx.me.role === 'admin';
   const channels = await guard(() => api.get('/api/channels'));
   const channel = channels?.find((c) => c.id === id);
-  if (!channel || !channel.canEdit) {
+  if (!channel || !(channel.canAdd || channel.canEdit || channel.canManage)) {
     main.replaceChildren(h('h1', {}, 'Channel not found'), h('p', {}, h('a', { href: '#/channels' }, 'Back to channels')));
     return null;
   }
@@ -70,8 +74,108 @@ export async function channelView(main, ctx, id) {
   const open = new Set();
   let dragging = false;
   let items = [];
+  // Times waiting for their other half. They can only be saved as a pair, and a refresh must not lose them.
+  const timeDrafts = new Map();
 
   const save = (itemId, patch) => guard(() => api.patch(`/api/playlist-items/${itemId}`, patch));
+
+  // Saves a schedule change and updates the row in place, because a re-render would close
+  // a date or time picker. On a refusal, the field goes back to what is saved.
+  async function saveSchedule(item, patch, revert) {
+    const updated = await save(item.id, patch);
+    if (!updated) {
+      revert();
+      return;
+    }
+    Object.assign(item, updated);
+    listEl.querySelector(`[data-id="${item.id}"] [data-status]`)?.replaceWith(statusLine(item));
+  }
+
+  function scheduleSection(item) {
+    const dateInput = (key) => {
+      const input = h('input', {
+        type: 'date',
+        value: item[key] ?? '',
+        onchange: () => {
+          // Typing a year passes through values like 0002-11-01. Wait for the rest of it.
+          if (input.value && input.value < '2000') return;
+          const revert = () => { input.value = item[key] ?? ''; };
+          saveSchedule(item, { [key]: input.value || null }, () => {
+            // Still being typed in, so leave it until they move on.
+            if (document.activeElement === input) input.addEventListener('blur', revert, { once: true });
+            else revert();
+          });
+        },
+      });
+      return input;
+    };
+
+    const draft = timeDrafts.get(item.id);
+    const timeHint = h('p', { class: 'muted small', hidden: !draft }, 'Add the other time to save this. Both are needed.');
+    const commitTimes = () => {
+      const [start, end] = [startTime.value, endTime.value];
+      const waiting = !start !== !end;
+      timeHint.hidden = !waiting;
+      if (waiting) {
+        timeDrafts.set(item.id, { startTime: start, endTime: end });
+        return;
+      }
+      timeDrafts.delete(item.id);
+      if (start === (item.startTime ?? '') && end === (item.endTime ?? '')) return;
+      saveSchedule(item, { startTime: start || null, endTime: end || null }, () => {
+        startTime.value = item.startTime ?? '';
+        endTime.value = item.endTime ?? '';
+      });
+    };
+    const startTime = h('input', { type: 'time', value: draft ? draft.startTime : item.startTime ?? '', onchange: commitTimes });
+    const endTime = h('input', { type: 'time', value: draft ? draft.endTime : item.endTime ?? '', onchange: commitTimes });
+
+    const dayOn = (i) => item.days === null || (item.days & (1 << i)) !== 0;
+    const dayChecks = DAY_NAMES.map((_, i) => h('input', {
+      type: 'checkbox',
+      checked: dayOn(i),
+      onchange: () => {
+        const mask = dayChecks.reduce((sum, c, n) => sum + (c.checked ? 1 << n : 0), 0);
+        saveSchedule(item, { days: mask === ALL_DAYS ? null : mask }, () => {
+          dayChecks.forEach((c, n) => { c.checked = dayOn(n); });
+        });
+      },
+    }));
+
+    return h('fieldset', { class: 'schedule' },
+      h('legend', {}, 'Schedule'),
+      h('p', { class: 'muted small' }, 'Leave these empty to show this item all the time. Schedules follow the clock on the computer running Network Signage, not the TV.'),
+      h('div', { class: 'row' }, field('Start date', dateInput('startDate')), field('End date', dateInput('endDate'))),
+      h('div', { class: 'row', style: 'margin-top:8px' }, field('Start time', startTime), field('End time', endTime)),
+      timeHint,
+      h('p', { class: 'muted small', style: 'margin-top:8px' }, 'If the end time is earlier than the start time, it runs overnight and finishes the next morning.'),
+      h('div', { class: 'days', role: 'group', 'aria-label': 'Days of the week' },
+        DAY_NAMES.map((name, i) => h('label', { class: 'day' }, dayChecks[i], h('span', {}, name)))),
+      h('button', {
+        class: 'ghost',
+        onclick: () => guard(async () => {
+          timeDrafts.delete(item.id);
+          const updated = await api.patch(`/api/playlist-items/${item.id}`, { startDate: null, endDate: null, startTime: null, endTime: null, days: null });
+          Object.assign(item, updated);
+          render();
+          toast('Schedule cleared. This item now shows all the time.');
+        }),
+      }, 'Clear schedule'),
+    );
+  }
+
+  function statusLine(item) {
+    const m = item.media;
+    const text = m.status === 'processing'
+      ? `Converting${m.progress != null ? ` ${m.progress}%` : '…'}`
+      : m.status === 'failed'
+        ? (m.error ?? 'Failed')
+        : [TYPE_LABEL[m.type], m.pages ? `${m.pages} pages` : null, m.type === 'video' && !item.duration ? formatDuration(m.duration) : item.duration ? `${item.duration}s` : null, item.audio ? 'sound on' : null, !item.enabled ? 'hidden' : null].filter(Boolean).join(' · ');
+    return h('div', { class: `small ${m.status === 'failed' ? 'err' : 'muted'}`, 'data-status': '' },
+      text, ' ',
+      m.status === 'ready' && item.enabled && h('span', { class: `sched sched-${item.scheduleStatus}` }, STATUS_LABEL[item.scheduleStatus]),
+    );
+  }
 
   function settings(item) {
     const isVideo = item.media.type === 'video';
@@ -81,12 +185,9 @@ export async function channelView(main, ctx, id) {
       placeholder: isVideo ? 'Full length' : item.media.type === 'hls' ? '60' : '10',
       onchange: (e) => save(item.id, { duration: e.target.value === '' ? null : Number(e.target.value) }),
     });
-    const transition = h('select', { onchange: (e) => save(item.id, { transition: e.target.value }) },
-      ['cut', 'fade', 'slide'].map((t) => h('option', { value: t, selected: item.transition === t }, t[0].toUpperCase() + t.slice(1))));
     return h('div', { class: 'pl-settings' },
       h('div', { class: 'row', style: 'margin-top:8px' },
         field(item.media.type === 'pdf' ? 'Seconds per page' : 'Seconds on screen', duration),
-        field('Transition', transition),
       ),
       h('div', { style: 'margin-top:8px' },
         (isVideo || item.media.type === 'hls') && checkbox('Play sound', {
@@ -98,6 +199,18 @@ export async function channelView(main, ctx, id) {
           onchange: (e) => save(item.id, { enabled: e.target.checked }),
         }),
       ),
+      transitionSettings({
+        legend: 'Transition into this item',
+        style: item.transitionStyle,
+        speed: item.transitionSpeed,
+        inherited: item.inheritedTransition,
+        save: async (patch) => {
+          const updated = await save(item.id, { transitionStyle: patch.style, transitionSpeed: patch.speed });
+          if (updated) Object.assign(item, updated);
+          return !!updated;
+        },
+      }),
+      scheduleSection(item),
       h('button', {
         class: 'ghost danger-text',
         style: 'margin-top:4px',
@@ -112,18 +225,13 @@ export async function channelView(main, ctx, id) {
 
   function row(item) {
     const m = item.media;
-    const status = m.status === 'processing'
-      ? `Converting${m.progress != null ? ` ${m.progress}%` : '…'}`
-      : m.status === 'failed'
-        ? (m.error ?? 'Failed')
-        : [TYPE_LABEL[m.type], m.pages ? `${m.pages} pages` : null, m.type === 'video' && !item.duration ? formatDuration(m.duration) : item.duration ? `${item.duration}s` : null, item.audio ? 'sound on' : null, !item.enabled ? 'hidden' : null].filter(Boolean).join(' · ');
     const expanded = open.has(item.id);
     return h('div', { class: `pl-item${item.enabled ? '' : ' off'}`, 'data-id': item.id },
       h('div', { class: 'tile' },
-        h('span', { class: 'handle', 'aria-label': 'Drag to reorder', title: 'Drag to reorder' }, '⠿'),
+        channel.canEdit && h('span', { class: 'handle', 'aria-label': 'Drag to reorder', title: 'Drag to reorder' }, '⠿'),
         thumb(m),
-        h('div', { class: 'grow' }, h('div', { class: 'title' }, m.name), h('div', { class: `small ${m.status === 'failed' ? 'err' : 'muted'}` }, status)),
-        h('button', {
+        h('div', { class: 'grow' }, h('div', { class: 'title' }, m.name), statusLine(item)),
+        channel.canEdit && h('button', {
           class: 'ghost',
           'aria-expanded': String(expanded),
           onclick: () => {
@@ -147,6 +255,22 @@ export async function channelView(main, ctx, id) {
     if (dragging || listEl.contains(document.activeElement) && document.activeElement.tagName !== 'BUTTON') return;
     items = await api.get(`/api/channels/${id}/items`);
     render();
+    if (channelDefaults) {
+      const fresh = (await api.get('/api/channels')).find((c) => c.id === id);
+      if (fresh) channelDefaults.show(fresh.defaultTransitionStyle, fresh.defaultTransitionSpeed);
+    }
+  }
+
+  // Statuses change with the clock, not just when someone edits something. Only the
+  // status lines change here, so this is safe while someone is using a field.
+  async function refreshStatuses() {
+    const fresh = await api.get(`/api/channels/${id}/items`);
+    for (const f of fresh) {
+      const item = items.find((i) => i.id === f.id);
+      if (!item || item.scheduleStatus === f.scheduleStatus) continue;
+      item.scheduleStatus = f.scheduleStatus;
+      listEl.querySelector(`[data-id="${item.id}"] [data-status]`)?.replaceWith(statusLine(item));
+    }
   }
 
   function addFromLibrary() {
@@ -170,6 +294,18 @@ export async function channelView(main, ctx, id) {
     });
   }
 
+  const channelDefaults = channel.canEdit && transitionSettings({
+    legend: 'Default transition',
+    intro: 'Items on this channel use this unless they have their own transition. Items added later use it too, and changing it here changes them all.',
+    style: channel.defaultTransitionStyle,
+    speed: channel.defaultTransitionSpeed,
+    save: async (patch) => {
+      const updated = await guard(() => api.patch(`/api/channels/${id}`, { defaultTransitionStyle: patch.style, defaultTransitionSpeed: patch.speed }));
+      if (updated) await guard(refresh);
+      return !!updated;
+    },
+  });
+
   const frame = h('iframe', { src: `/play/${channel.slug}?preview=1`, title: `Live preview of ${channel.name}` });
   const previewBox = h('div', { class: 'preview' }, frame);
   const scale = () => {
@@ -181,7 +317,7 @@ export async function channelView(main, ctx, id) {
   main.replaceChildren(
     h('div', { class: 'page-head' },
       h('div', {}, h('a', { href: '#/channels', class: 'small' }, '‹ Channels'), h('h1', {}, channel.name)),
-      isAdmin && h('div', { class: 'actions' },
+      channel.canManage && h('div', { class: 'actions' },
         h('button', {
           onclick: () => guard(async () => {
             const next = prompt('Channel name', channel.name);
@@ -207,15 +343,17 @@ export async function channelView(main, ctx, id) {
       previewBox,
       h('p', { class: 'muted small', style: 'margin:.6rem 0 0' }, 'TV address: ', h('span', { class: 'code' }, tvUrl)),
     ),
+    channelDefaults && h('section', { class: 'card' }, channelDefaults),
     h('div', { class: 'actions' },
-      h('button', { class: 'primary', onclick: addFromLibrary }, 'Add from library'),
-      h('a', { class: 'btn', href: `#/upload?channel=${id}` }, 'Upload to this channel'),
+      channel.canAdd && h('button', { class: 'primary', onclick: addFromLibrary }, 'Add from library'),
+      channel.canAdd && ctx.can('library.upload') && h('a', { class: 'btn', href: `#/upload?channel=${id}` }, 'Upload to this channel'),
     ),
     listEl,
   );
 
   await refresh();
-  const sortable = window.Sortable.create(listEl, {
+  const statusTimer = setInterval(() => refreshStatuses().catch(() => {}), STATUS_REFRESH_MS);
+  const sortable = channel.canEdit && window.Sortable.create(listEl, {
     handle: '.handle',
     animation: 150,
     onStart: () => { dragging = true; },
@@ -231,7 +369,8 @@ export async function channelView(main, ctx, id) {
   return {
     refresh: (s) => (s.includes('channels') || s.includes('media')) && guard(refresh),
     destroy: () => {
-      sortable.destroy();
+      clearInterval(statusTimer);
+      if (sortable) sortable.destroy();
       observer.disconnect();
     },
   };

@@ -1,10 +1,14 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
+import { Transform } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
-import { requireUser, httpError, canEditChannel, canEditMedia } from '../auth.js';
+import { requireUser, requirePermission, httpError, canAddToChannel, canEditMedia, mediaInScope } from '../auth.js';
+import { deleteBlock, findDuplicate, removeMedia } from '../library.js';
+import { mediaFolder } from '../safe-path.js';
 import { sniffImage } from '../media.js';
 import { addToChannel } from './channels.js';
+import { parseStyle, validateStyle } from '../slide-style.js';
 import { text } from './auth.js';
 
 const VIDEO_EXT = /\.(mp4|m4v|mov|webm|mkv|avi|mpe?g|wmv|ts|mts|m2ts|3gp)$/i;
@@ -15,8 +19,17 @@ export function mediaJson(m) {
     thumb: m.thumb ? `/media/${m.id}/${m.thumb}` : null,
     src: m.file ? `/media/${m.id}/${m.file}` : m.url ?? null,
     duration: m.duration, pages: m.pages, url: m.url, title: m.title, body: m.body, size: m.size,
+    style: parseStyle(m.style),
     createdAt: m.created_at,
+    createdBy: m.created_by,
+    folderId: m.folder_id ?? null,
+    live: isLiveFeedUrl(m.url),
   };
+}
+
+// parseWebUrl only accepts absolute addresses, so only a live feed's can look like this.
+function isLiveFeedUrl(url) {
+  return typeof url === 'string' && url.startsWith('/live/');
 }
 
 // Web pages are shown in an iframe, so only plain http(s) pages are allowed, and never YouTube.
@@ -32,14 +45,15 @@ export function parseWebUrl(value) {
   return url;
 }
 
-export default async function mediaRoutes(app, { db, hub, processor, mediaDir }) {
+export default async function mediaRoutes(app, { db, hub, processor, live, mediaDir }) {
+  const requireUpload = requirePermission('library.upload');
   const insert = (fields) => {
     const id = fields.id ?? randomUUID();
     db.run(
-      `INSERT INTO media (id, type, name, status, file, pages, url, title, body, size, created_by, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO media (id, type, name, status, file, pages, url, title, body, size, sha256, style, created_by, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       id, fields.type, fields.name, fields.status ?? 'ready', fields.file ?? null, fields.pages ?? null,
-      fields.url ?? null, fields.title ?? null, fields.body ?? null, fields.size ?? null, fields.userId, Date.now(),
+      fields.url ?? null, fields.title ?? null, fields.body ?? null, fields.size ?? null, fields.sha256 ?? null, fields.style ?? null, fields.userId, Date.now(),
     );
     return id;
   };
@@ -52,7 +66,7 @@ export default async function mediaRoutes(app, { db, hub, processor, mediaDir })
     if (req.query.channelId === undefined || req.query.channelId === '') return null;
     const id = Number(req.query.channelId);
     if (!db.get('SELECT 1 AS x FROM channels WHERE id = ?', id)) throw httpError(404, 'Channel not found.');
-    if (!canEditChannel(req.user, id)) throw httpError(403, 'You are not assigned to this channel.');
+    if (!canAddToChannel(req.user, id)) throw httpError(403, 'You cannot add items to this channel.');
     return id;
   };
   const finish = (id, channelId) => {
@@ -64,16 +78,22 @@ export default async function mediaRoutes(app, { db, hub, processor, mediaDir })
     hub.adminRefresh('media');
     return mediaJson(getMedia(id));
   };
+  const styleJson = (value) => {
+    const style = validateStyle(db, value ?? null);
+    return style ? JSON.stringify(style) : null;
+  };
   const assertCanEdit = (req, id) => {
-    if (!canEditMedia(db, req.user, id)) throw httpError(403, 'This item is also used on channels you do not manage.');
+    if (canEditMedia(db, req.user, id)) return;
+    throw httpError(403, mediaInScope(db, req.user, id) ? 'You can only change items you uploaded.' : 'This item is also used on channels you do not manage.');
   };
 
   app.get('/api/media', { preHandler: requireUser }, async () =>
-    db.all('SELECT * FROM media ORDER BY created_at DESC, rowid DESC').map(mediaJson),
+    db.all('SELECT * FROM media ORDER BY created_at DESC, rowid DESC').map((m) => ({ ...mediaJson(m), liveStatus: live.statusOf(m.id) })),
   );
 
-  // Image or video upload, streamed straight to disk.
-  app.post('/api/media', { preHandler: requireUser }, async (req) => {
+  // Image or video upload, streamed straight to disk. The hash is taken on the way through, so a
+  // large file is never read twice and a video's hash is of its source, which conversion deletes.
+  app.post('/api/media', { preHandler: requireUpload }, async (req) => {
     const channelId = targetChannel(req);
     const part = await req.file();
     if (!part) throw httpError(400, 'No file was sent.');
@@ -82,7 +102,14 @@ export default async function mediaRoutes(app, { db, hub, processor, mediaDir })
     fs.mkdirSync(dir, { recursive: true });
     const tmp = path.join(dir, 'upload.tmp');
     try {
-      await pipeline(part.file, fs.createWriteStream(tmp));
+      const hash = createHash('sha256');
+      const hasher = new Transform({
+        transform(chunk, _encoding, done) {
+          hash.update(chunk);
+          done(null, chunk);
+        },
+      });
+      await pipeline(part.file, hasher, fs.createWriteStream(tmp));
       if (part.file.truncated) throw httpError(413, 'That file is too large.');
       const head = Buffer.alloc(16);
       const fd = fs.openSync(tmp, 'r');
@@ -104,9 +131,11 @@ export default async function mediaRoutes(app, { db, hub, processor, mediaDir })
         throw httpError(415, 'Use JPG, PNG, WebP or GIF images, or a video file. PDFs upload from the admin page.');
       }
       fs.renameSync(tmp, path.join(dir, file));
-      insert({ id, type, name, status: 'processing', file, size: fs.statSync(path.join(dir, file)).size, userId: req.user.id });
+      const sha256 = hash.digest('hex');
+      insert({ id, type, name, status: 'processing', file, size: fs.statSync(path.join(dir, file)).size, sha256, userId: req.user.id });
       processor.enqueue(id);
-      return finish(id, channelId);
+      // A match never stops the upload. The new item stays, and the admin page offers to discard it.
+      return { ...finish(id, channelId), duplicateOf: findDuplicate(db, sha256, id) };
     } catch (err) {
       fs.rmSync(dir, { recursive: true, force: true });
       throw err;
@@ -115,7 +144,7 @@ export default async function mediaRoutes(app, { db, hub, processor, mediaDir })
 
   // PDFs are rendered to page images by the browser, which keeps the server
   // free of native PDF libraries. Create the item, send each page, then finish.
-  app.post('/api/media/pdf', { preHandler: requireUser }, async (req) => {
+  app.post('/api/media/pdf', { preHandler: requireUpload }, async (req) => {
     const name = text(req.body?.name, 'Name', { max: 120 });
     const pages = Number(req.body?.pages);
     if (!Number.isInteger(pages) || pages < 1 || pages > 500) throw httpError(400, 'A PDF can have 1 to 500 pages.');
@@ -132,7 +161,7 @@ export default async function mediaRoutes(app, { db, hub, processor, mediaDir })
     return m;
   };
 
-  app.post('/api/media/:id/pages/:n', { preHandler: requireUser }, async (req) => {
+  app.post('/api/media/:id/pages/:n', { preHandler: requireUpload }, async (req) => {
     const m = getPdfUpload(req);
     const n = Number(req.params.n);
     if (!Number.isInteger(n) || n < 1 || n > m.pages) throw httpError(400, 'Bad page number.');
@@ -140,14 +169,14 @@ export default async function mediaRoutes(app, { db, hub, processor, mediaDir })
     if (!part) throw httpError(400, 'No page image was sent.');
     const buf = await part.toBuffer();
     if (sniffImage(buf) !== 'jpg') throw httpError(415, 'Page images must be JPEG.');
-    fs.writeFileSync(path.join(mediaDir, m.id, `page-${n}.jpg`), buf);
+    fs.writeFileSync(path.join(mediaFolder(mediaDir, m.id), `page-${n}.jpg`), buf);
     return { ok: true };
   });
 
-  app.post('/api/media/:id/finish', { preHandler: requireUser }, async (req) => {
+  app.post('/api/media/:id/finish', { preHandler: requireUpload }, async (req) => {
     const channelId = targetChannel(req);
     const m = getPdfUpload(req);
-    const dir = path.join(mediaDir, m.id);
+    const dir = mediaFolder(mediaDir, m.id);
     let size = 0;
     for (let n = 1; n <= m.pages; n++) {
       const p = path.join(dir, `page-${n}.jpg`);
@@ -158,14 +187,15 @@ export default async function mediaRoutes(app, { db, hub, processor, mediaDir })
     return finish(m.id, channelId);
   });
 
-  app.post('/api/media/text', { preHandler: requireUser }, async (req) => {
+  app.post('/api/media/text', { preHandler: requireUpload }, async (req) => {
     const channelId = targetChannel(req);
     const title = text(req.body?.title, 'Title', { max: 200 });
     const body = text(req.body?.body, 'Message', { max: 2000, required: false });
-    return finish(insert({ type: 'text', name: title.slice(0, 120), title, body, userId: req.user.id }), channelId);
+    const style = styleJson(req.body?.style);
+    return finish(insert({ type: 'text', name: title.slice(0, 120), title, body, style, userId: req.user.id }), channelId);
   });
 
-  app.post('/api/media/url', { preHandler: requireUser }, async (req) => {
+  app.post('/api/media/url', { preHandler: requireUpload }, async (req) => {
     const channelId = targetChannel(req);
     const url = parseWebUrl(req.body?.url);
     const name = text(req.body?.name, 'Name', { max: 120, required: false }) || url.hostname;
@@ -173,36 +203,45 @@ export default async function mediaRoutes(app, { db, hub, processor, mediaDir })
     return finish(insert({ type, name, url: url.href, userId: req.user.id }), channelId);
   });
 
-  app.patch('/api/media/:id', { preHandler: requireUser }, async (req) => {
+  app.patch('/api/media/:id', { preHandler: requirePermission('library.edit', 'library.own') }, async (req) => {
     const m = getMedia(req.params.id);
     assertCanEdit(req, m.id);
     const b = req.body ?? {};
     const name = b.name === undefined ? m.name : text(b.name, 'Name', { max: 120 });
-    let { title, body, url } = m;
+    let { title, body, url, style } = m;
     if (m.type === 'text') {
       if (b.title !== undefined) title = text(b.title, 'Title', { max: 200 });
       if (b.body !== undefined) body = text(b.body, 'Message', { max: 2000, required: false });
+      if (b.style !== undefined) style = styleJson(b.style);
+    } else if (b.style !== undefined) {
+      throw httpError(400, 'Only text announcements have a design.');
     }
-    if ((m.type === 'web' || m.type === 'hls') && b.url !== undefined) url = parseWebUrl(b.url).href;
-    db.run('UPDATE media SET name = ?, title = ?, body = ?, url = ?, rev = rev + 1 WHERE id = ?', name, title, body, url, m.id);
+    if (live.isFeed(m.id)) {
+      if (b.url !== undefined && b.url !== m.url) throw httpError(400, "A live feed's address cannot be changed.");
+    } else if ((m.type === 'web' || m.type === 'hls') && b.url !== undefined) {
+      url = parseWebUrl(b.url).href;
+    }
+    db.run('UPDATE media SET name = ?, title = ?, body = ?, url = ?, style = ?, rev = rev + 1 WHERE id = ?', name, title, body, url, style, m.id);
     hub.pushMedia(m.id);
     hub.adminRefresh('media');
     hub.adminRefresh('channels');
     return mediaJson(getMedia(m.id));
   });
 
-  app.delete('/api/media/:id', { preHandler: requireUser }, async (req) => {
+  // The same checks as deleting from the library's bulk actions, in deleteBlock.
+  app.delete('/api/media/:id', { preHandler: requirePermission('library.edit', 'library.own', 'live.manage') }, async (req) => {
     const m = getMedia(req.params.id);
-    assertCanEdit(req, m.id);
-    const channels = db.all('SELECT DISTINCT channel_id FROM playlist_items WHERE media_id = ?', m.id);
-    const wasOverride = db.get('SELECT 1 AS x FROM overrides WHERE media_id = ? AND cleared_at IS NULL', m.id);
-    db.run('DELETE FROM media WHERE id = ?', m.id);
-    fs.rmSync(path.join(mediaDir, m.id), { recursive: true, force: true });
+    const block = deleteBlock(db, live, req.user, m);
+    if (block === 'feed') throw httpError(403, 'You do not have permission to delete a live feed.');
+    if (block === 'scope') throw httpError(403, 'This item is also used on channels you do not manage.');
+    if (block) throw httpError(403, 'You can only change items you uploaded.');
+    const { channels, wasOverride } = await removeMedia({ db, live, mediaDir, log: app.log }, m);
     if (wasOverride) hub.pushAll();
-    else for (const c of channels) hub.pushChannel(c.channel_id);
+    else for (const c of channels) hub.pushChannel(c);
     hub.adminRefresh('media');
     hub.adminRefresh('channels');
     hub.adminRefresh('overrides');
+    hub.adminRefresh('live');
     return { ok: true };
   });
 }

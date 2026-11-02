@@ -1,7 +1,8 @@
-import { hashPassword, verifyPassword, createSession, destroySession, publicUser, requireUser, httpError, createLoginLimiter, COOKIE } from '../auth.js';
+import { hashPassword, verifyPassword, createSession, destroySession, publicUser, requireUser, httpError, COOKIE } from '../auth.js';
 import { VERSION } from '../version.js';
 import { baseUrls } from '../lan.js';
 import QRCode from 'qrcode';
+import { ROLE_IDS } from '../permissions.js';
 
 export function text(value, field, { max = 200, required = true } = {}) {
   const v = typeof value === 'string' ? value.trim() : '';
@@ -22,8 +23,7 @@ export function username(value) {
   return v;
 }
 
-export default async function authRoutes(app, { db, port }) {
-  const limiter = createLoginLimiter();
+export default async function authRoutes(app, { db, port, limiter, backup }) {
   const hasUsers = () => !!db.get('SELECT 1 AS x FROM users LIMIT 1');
 
   app.get('/api/setup/status', async () => ({ needsSetup: !hasUsers() }));
@@ -36,9 +36,11 @@ export default async function authRoutes(app, { db, port }) {
     const uname = username(b.username);
     const hash = await hashPassword(password(b.password));
     if (hasUsers()) throw httpError(409, 'Setup is already complete.');
+    // A restore accepted while the password was hashing is about to replace this database.
+    if (backup.restarting) throw httpError(409, 'A backup is being restored, so setup was stopped.');
     const { lastInsertRowid } = db.run(
-      "INSERT INTO users (username, name, password_hash, role, can_override, created_at) VALUES (?, ?, ?, 'admin', 1, ?)",
-      uname, name, hash, Date.now(),
+      "INSERT INTO users (username, name, password_hash, role, can_override, role_id, created_at) VALUES (?, ?, ?, 'admin', 1, ?, ?)",
+      uname, name, hash, ROLE_IDS.admin, Date.now(),
     );
     db.setSetting('branding', { ...db.branding(), orgName });
     createSession(db, reply, Number(lastInsertRowid));

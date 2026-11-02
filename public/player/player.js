@@ -2,11 +2,18 @@
 (function () {
   'use strict';
 
-  var FADE_MS = 700;
   var READY_TIMEOUT_MS = 8000;
   var PRELOAD_LEAD_S = 8;
   var STALL_S = 15;
+  var RETRY_MS = 10000;
+  var HLS_RETRY_MS = 3000;
   var MAX_CACHE_FILE = 500 * 1024 * 1024;
+  var SCHEDULE_CHECK_TICKS = 15; // tick() runs once a second
+  var CLOCK_KEY = 'signage-clock-offset';
+
+  var Schedule = window.SignageSchedule;
+  var Slide = window.SignageSlide;
+  var Transitions = window.SignageTransitions;
 
   var pathParts = location.pathname.split('/');
   var slug = pathParts[1] === 'play' && pathParts[2] ? decodeURIComponent(pathParts[2]) : null;
@@ -34,6 +41,12 @@
   var zIndex = 1;
   var idleEl = null;
   var lastProgress = { time: -1, at: 0 };
+  var clockOffset = null;    // host wall clock minus this TV's clock, so a wrong TV clock doesn't matter
+  var storedOffset = null;
+  var activeSlides = [];     // playlist slides on at the last check; indexes point into this list
+  var ticksSinceCheck = 0;
+  var pendingKey = null;     // the slide being loaded to replace the current one
+  var leaving = [];          // slides still on screen while the next one transitions in
 
   // ---------- storage helpers ----------
 
@@ -70,6 +83,7 @@
     var queue = [];
     var busy = false;
     var full = false;
+    var unavailable = false; // this browser can't store files at all, which isn't running out of room
 
     function open(cb) {
       if (db) return cb(db);
@@ -94,17 +108,36 @@
       }
     }
 
+    function isQuotaError(err) {
+      return !!err && (err.name === 'QuotaExceededError' || err.name === 'NS_ERROR_DOM_QUOTA_REACHED' || err.code === 22);
+    }
+
     function put(url, blob, cb) {
       open(function (d) {
         if (!d) return cb(false);
+        var settled = false;
+        function fail(err) {
+          if (settled) return;
+          settled = true;
+          if (isQuotaError(err)) full = true;
+          else unavailable = true;
+          cb(false);
+        }
         try {
           var tx = d.transaction('files', 'readwrite');
           tx.objectStore('files').put(blob, url);
-          tx.oncomplete = function () { cb(true); };
-          tx.onerror = tx.onabort = function () { full = true; cb(false); };
+          tx.oncomplete = function () {
+            if (settled) return;
+            settled = true;
+            cb(true);
+          };
+          tx.onerror = function (ev) {
+            var err = (ev && ev.target && ev.target.error) || tx.error;
+            if (err) fail(err); // With none yet, the abort that follows says why.
+          };
+          tx.onabort = function () { fail(tx.error); };
         } catch (e) {
-          full = true;
-          cb(false);
+          fail(e);
         }
       });
     }
@@ -136,7 +169,7 @@
     }
 
     function pump() {
-      if (busy || full || !queue.length) return;
+      if (busy || full || unavailable || !queue.length) return;
       var url = queue.shift();
       busy = true;
       function next() {
@@ -191,7 +224,7 @@
       });
     }
 
-    return { resolve: resolve, sync: sync };
+    return { resolve: resolve, sync: sync, isFull: function () { return full; } };
   })();
 
   function cacheableUrls() {
@@ -204,6 +237,8 @@
       if (s.src && s.src.indexOf('/media/') === 0 && (!s.size || s.size <= MAX_CACHE_FILE) && urls.indexOf(s.src) < 0) {
         urls.push(s.src);
       }
+      var picture = s.style && s.style.imageUrl;
+      if (picture && urls.indexOf(picture) < 0) urls.push(picture);
     }
     return urls;
   }
@@ -212,12 +247,6 @@
 
   var appliedFont = null;
 
-  function fontFamily(b) {
-    if (b.fontMode === 'google' && b.fontFamily) return '"' + b.fontFamily + '", sans-serif';
-    if (b.fontMode === 'upload' && b.fontFile) return 'SignageCustom, sans-serif';
-    return '';
-  }
-
   function applyBranding(b) {
     if (!b) return;
     messageEl.style.background = b.primaryColor;
@@ -225,21 +254,7 @@
     var marker = b.fontMode + '|' + b.fontFamily + '|' + b.fontFile;
     if (marker === appliedFont) return;
     appliedFont = marker;
-    var old = document.getElementById('brand-font');
-    if (old) old.parentNode.removeChild(old);
-    var el;
-    if (b.fontMode === 'google' && b.fontFamily) {
-      el = document.createElement('link');
-      el.rel = 'stylesheet';
-      el.href = 'https://fonts.googleapis.com/css?family=' + encodeURIComponent(b.fontFamily) + ':400,600,700&display=swap';
-    } else if (b.fontMode === 'upload' && b.fontFile) {
-      el = document.createElement('style');
-      el.appendChild(document.createTextNode('@font-face{font-family:SignageCustom;src:url("' + b.fontFile + '");font-display:swap}'));
-    }
-    if (el) {
-      el.id = 'brand-font';
-      document.getElementsByTagName('head')[0].appendChild(el);
-    }
+    if (Slide) Slide.applyFont(document, b);
   }
 
   function branding() {
@@ -248,35 +263,6 @@
 
   // ---------- slide elements ----------
 
-  function makeText(slide) {
-    var b = branding();
-    var root = document.createElement('div');
-    root.className = 'text-slide';
-    root.style.background = b.primaryColor;
-    root.style.color = b.textColor;
-    var font = fontFamily(b);
-    if (font) root.style.fontFamily = font;
-    var rule = document.createElement('div');
-    rule.className = 'rule';
-    rule.style.background = b.accentColor;
-    root.appendChild(rule);
-    var h = document.createElement('h1');
-    h.textContent = slide.title || '';
-    root.appendChild(h);
-    if (slide.body) {
-      var p = document.createElement('p');
-      p.textContent = slide.body;
-      root.appendChild(p);
-    }
-    if (b.logo) {
-      var logo = document.createElement('img');
-      logo.className = 'logo';
-      logo.src = b.logo;
-      root.appendChild(logo);
-    }
-    return root;
-  }
-
   function loadHls(cb) {
     if (window.Hls) return cb();
     var s = document.createElement('script');
@@ -284,6 +270,15 @@
     s.onload = cb;
     s.onerror = cb;
     document.getElementsByTagName('head')[0].appendChild(s);
+  }
+
+  function hlsConfig(slide) {
+    // A feed from this server has 1-second segments, so it can buffer very little
+    // and jump back to the live edge if it falls behind. Others keep gentler settings.
+    if (slide.src.indexOf('/live/') === 0) {
+      return { liveSyncDurationCount: 2, liveMaxLatencyDurationCount: 5, maxBufferLength: 4, maxMaxBufferLength: 8, backBufferLength: 4 };
+    }
+    return { liveSyncDurationCount: 2, maxBufferLength: 10, backBufferLength: 10 };
   }
 
   // Builds a slide in a hidden layer and calls back when it is ready to show (or has failed).
@@ -307,10 +302,12 @@
       finish(slide.type === 'web' || slide.type === 'text');
     }, READY_TIMEOUT_MS);
 
-    if (slide.type === 'text') {
-      prep.el = makeText(slide);
+    if (slide.type === 'text' && Slide) {
+      prep.view = Slide.render(slide, branding(), { now: wallMs, resolve: MediaCache.resolve });
+      prep.el = prep.view.el;
       layer.appendChild(prep.el);
-      finish(true);
+      prep.view.fit();
+      prep.view.whenReady(function () { finish(true); });
     } else if (slide.type === 'image') {
       var img = document.createElement('img');
       prep.el = img;
@@ -343,18 +340,44 @@
       layer.appendChild(video);
       if (slide.type === 'video') {
         MediaCache.resolve(slide.src, function (url) { if (!prep.disposed) video.src = url; });
-      } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
+      } else if (video.canPlayType('application/vnd.apple.mpegurl') && slide.src.indexOf('/live/') !== 0) {
+        // Native needs no CORS, which a stream on someone else's server may not offer hls.js.
         video.src = slide.src;
       } else {
+        // Our own feeds prefer hls.js wherever it runs: Android WebView and Chrome answer "maybe"
+        // to the check above, and native playback there gets neither the low-latency settings nor
+        // the error recovery. A TV with no MSE, or where hls.js won't load, still has native.
+        var canNative = !!video.canPlayType('application/vnd.apple.mpegurl');
         loadHls(function () {
           if (prep.disposed) return;
-          if (!window.Hls || !window.Hls.isSupported()) return finish(false);
-          var hls = new window.Hls({ liveSyncDurationCount: 2, maxBufferLength: 10, backBufferLength: 10 });
+          var hls = null;
+          try {
+            if (window.Hls && window.Hls.isSupported()) hls = new window.Hls(hlsConfig(slide));
+          } catch (e) {}
+          if (!hls) {
+            if (canNative) video.src = slide.src;
+            else finish(false);
+            return;
+          }
           prep.hls = hls;
+          var triedMediaRecovery = false;
           hls.on(window.Hls.Events.ERROR, function (event, data) {
             if (!data.fatal) return;
+            if (data.type === window.Hls.ErrorTypes.MEDIA_ERROR && !triedMediaRecovery) {
+              triedMediaRecovery = true;
+              hls.recoverMediaError();
+              return;
+            }
+            if (!finished && canNative) {
+              // Some TVs claim MSE but can't decode through it. Their native player was fine.
+              prep.hls = null;
+              try { hls.destroy(); } catch (e) {}
+              video.src = slide.src;
+              return;
+            }
             if (!finished) finish(false);
             else if (current === prep) failCurrent();
+            else prep.failed = true; // loading off-screen: show() builds it again
           });
           hls.loadSource(slide.src);
           hls.attachMedia(video);
@@ -405,37 +428,37 @@
 
   // ---------- transitions ----------
 
-  function setStyle(el, prop, value) {
-    el.style[prop] = value;
-    el.style['webkit' + prop.charAt(0).toUpperCase() + prop.slice(1)] = value;
+  // The old slide stays up until the new one has fully covered it. A timer disposes of it,
+  // because transitionend can't be relied on.
+  function retire(outgoing, prep, ms) {
+    leaving.push(outgoing);
+    setTimeout(function () {
+      var at = leaving.indexOf(outgoing);
+      if (at >= 0) leaving.splice(at, 1);
+      dispose(outgoing);
+      // If a newer slide has already taken over, this one may be moving out, so leave its styles.
+      if (current === prep) Transitions.settle(prep.layer);
+    }, ms + 100);
+  }
+
+  function disposeLeaving() {
+    var list = leaving;
+    leaving = [];
+    for (var i = 0; i < list.length; i++) dispose(list[i]);
   }
 
   function swapIn(prep) {
     var incoming = prep.layer;
     var outgoing = current;
-    var transition = prep.slide.transition;
     hideIdle();
+    pendingKey = null;
     incoming.style.zIndex = String(++zIndex);
     incoming.style.visibility = 'visible';
 
-    if (outgoing && transition !== 'cut') {
-      if (transition === 'slide') {
-        setStyle(incoming, 'transform', 'translateX(100%)');
-      } else {
-        incoming.style.opacity = '0';
-      }
-      void incoming.offsetWidth;
-      setStyle(incoming, 'transition', 'all ' + FADE_MS + 'ms ease');
-      if (transition === 'slide') {
-        setStyle(outgoing.layer, 'transition', 'all ' + FADE_MS + 'ms ease');
-        setStyle(outgoing.layer, 'transform', 'translateX(-100%)');
-        setStyle(incoming, 'transform', 'translateX(0)');
-      } else {
-        incoming.style.opacity = '1';
-      }
-      setTimeout(function () { dispose(outgoing); }, FADE_MS + 100);
-    } else if (outgoing) {
-      dispose(outgoing);
+    if (outgoing) {
+      var ms = Transitions ? Transitions.begin(incoming, outgoing.layer, prep.slide.transition, prep.slide.transitionMs) : 0;
+      if (ms) retire(outgoing, prep, ms);
+      else dispose(outgoing);
     }
 
     current = prep;
@@ -450,9 +473,81 @@
 
   // ---------- playback ----------
 
+  // Stays the same between schedule checks, so indexes keep meaning the same slides.
   function activeList() {
     if (!state) return [];
-    return state.override ? state.override.slides : state.slides;
+    return state.override ? state.override.slides : activeSlides;
+  }
+
+  function setClock(clock) {
+    var wall = Schedule ? Schedule.parseWall(clock) : null;
+    if (wall === null) return;
+    clockOffset = wall - Date.now();
+    // Kept so a TV that reloads while the server is away still follows the host's clock.
+    if (!isPreview && (storedOffset === null || Math.abs(clockOffset - storedOffset) > 5000)) {
+      storedOffset = clockOffset;
+      store(CLOCK_KEY, String(clockOffset));
+    }
+  }
+
+  function loadClock() {
+    var saved = load(CLOCK_KEY);
+    var offset = saved === null ? NaN : Number(saved);
+    if (!isNaN(offset)) clockOffset = storedOffset = offset;
+  }
+
+  function wallNow() {
+    return clockOffset === null ? Schedule.localClock(new Date()) : Schedule.formatWall(Date.now() + clockOffset);
+  }
+
+  function wallMs() {
+    return Schedule ? Schedule.parseWall(wallNow()) : null;
+  }
+
+  function scheduledSlides() {
+    var out = [];
+    var wall = null;
+    for (var i = 0; i < state.slides.length; i++) {
+      var s = state.slides[i];
+      if (s.schedule) {
+        if (!Schedule) continue;
+        if (wall === null) wall = wallNow();
+        if (!Schedule.isActive(s.schedule, wall)) continue;
+      }
+      out.push(s);
+    }
+    return out;
+  }
+
+  function keysOf(list) {
+    var keys = [];
+    for (var i = 0; i < list.length; i++) keys.push(list[i].key);
+    return keys.join('\n');
+  }
+
+  function indexOfKey(list, key) {
+    for (var i = 0; i < list.length; i++) {
+      if (list[i].key === key) return i;
+    }
+    return -1;
+  }
+
+  function checkSchedule() {
+    ticksSinceCheck = 0;
+    if (!state || state.override) return;
+    if (keysOf(scheduledSlides()) !== keysOf(activeSlides)) reconcile();
+  }
+
+  // Where to go when the current slide has left the list: whatever comes after it in the full playlist.
+  function successorIndex(list, fallback) {
+    var slides = state.slides;
+    var from = indexOfKey(slides, current.slide.key);
+    if (from < 0) return fallback;
+    for (var i = 1; i < slides.length; i++) {
+      var at = indexOfKey(list, slides[(from + i) % slides.length].key);
+      if (at >= 0) return at;
+    }
+    return fallback;
   }
 
   function arm() {
@@ -473,6 +568,7 @@
   }
 
   function advance() {
+    if (pendingKey !== null) return; // The next slide is on its way, and it re-arms when it arrives or fails.
     var list = activeList();
     if (!list.length) return showIdle();
     var i = nextIndex(list);
@@ -491,16 +587,20 @@
   }
 
   function show(slide) {
+    clearTimeout(endTimer);
+    deadline = null;
     var token = ++showToken;
     var ready = prepared;
     prepared = null;
+    pendingKey = slide.key;
     if (ready && ready.slide.key === slide.key) {
-      if (ready.isReady) return swapIn(ready);
+      if (ready.isReady && !ready.failed) return swapIn(ready);
       if (!ready.failed) {
         ready.onReady = function (ok) {
-          if (token !== showToken) return;
-          if (ok) swapIn(ready);
-          else showFresh(slide, token, true);
+          if (token !== showToken) return dispose(ready);
+          if (ok) return swapIn(ready);
+          dispose(ready);
+          showFresh(slide, token, true);
         };
         return;
       }
@@ -517,6 +617,7 @@
       // Some TVs decode only one video at a time: free the current one and retry.
       if (mayRetry && current && current.el && current.el.tagName === 'VIDEO' && (slide.type === 'video' || slide.type === 'hls')) {
         clearTimeout(endTimer);
+        disposeLeaving();
         dispose(current);
         current = null;
         return showFresh(slide, token, false);
@@ -527,13 +628,16 @@
 
   function skipBroken() {
     failures += 1;
+    pendingKey = null;
     var list = activeList();
     clearTimeout(endTimer);
     if (failures >= Math.max(list.length, 1)) {
       // Everything is failing: back off so this doesn't spin, and try again shortly.
+      // showIdle clears the timer, so it has to run first or the retry never happens.
       failures = 0;
-      endTimer = setTimeout(advance, 10000);
-      if (!current) showIdle();
+      // Nothing else can show, and a slide whose schedule ended must not stay up.
+      if (!current || indexOfKey(list, current.slide.key) < 0) showIdle();
+      endTimer = setTimeout(advance, list.length && list[0].type === 'hls' ? HLS_RETRY_MS : RETRY_MS);
       return;
     }
     endTimer = setTimeout(advance, 500);
@@ -547,7 +651,7 @@
   }
 
   function prepareNext() {
-    if (prepared || !current) return;
+    if (prepared || !current || pendingKey !== null) return;
     var list = activeList();
     if (list.length < 2) return;
     var slide = list[nextIndex(list)];
@@ -574,30 +678,35 @@
       state.override = null;
       reconcile();
     }
+    if (++ticksSinceCheck >= SCHEDULE_CHECK_TICKS) checkSchedule();
+    if (current && current.view) current.view.tick();
     var left = remainingSeconds();
     if (left !== null && left <= PRELOAD_LEAD_S) prepareNext();
 
-    // A file video that stops making progress gets skipped.
-    if (current && current.slide.type === 'video' && current.el && !current.el.paused) {
+    // A video or live stream that stops making progress gets skipped.
+    var playing = current && (current.slide.type === 'video' || current.slide.type === 'hls') && current.el;
+    if (playing && !current.el.paused) {
       var t = current.el.currentTime;
       if (t !== lastProgress.time) {
         lastProgress = { time: t, at: Date.now() };
       } else if (Date.now() - lastProgress.at > STALL_S * 1000) {
         failCurrent();
       }
-    } else if (current && current.slide.type === 'video' && current.el && current.el.paused && !current.el.ended) {
+    } else if (playing && current.el.paused && !current.el.ended) {
       if (Date.now() - lastProgress.at > STALL_S * 1000) failCurrent();
     }
   }
 
   function showIdle() {
     showToken++;
+    pendingKey = null;
     clearTimeout(endTimer);
     deadline = null;
     dispose(prepared);
     prepared = null;
     if (current) dispose(current);
     current = null;
+    disposeLeaving();
     var b = branding();
     if (!idleEl) {
       idleEl = document.createElement('div');
@@ -608,8 +717,7 @@
     idleEl.style.background = b.primaryColor;
     idleEl.style.color = b.textColor;
     idleEl.style.display = '';
-    var font = fontFamily(b);
-    idleEl.style.fontFamily = font || '';
+    idleEl.style.fontFamily = Slide ? Slide.fontFamily(b) : '';
     if (b.logo) {
       var img = document.createElement('img');
       img.src = b.logo;
@@ -627,6 +735,7 @@
 
   // Applies a new state without interrupting what is playing, unless it must change.
   function reconcile() {
+    activeSlides = state ? scheduledSlides() : [];
     var list = activeList();
     var newMode = state && state.override ? 'o' + state.override.id : 'playlist';
     var modeChanged = newMode !== mode;
@@ -639,19 +748,23 @@
     }
     if (!list.length) return showIdle();
 
-    var position = -1;
-    if (current) {
-      for (var i = 0; i < list.length; i++) {
-        if (list[i].key === current.slide.key) position = i;
-      }
-    }
+    var position = current ? indexOfKey(list, current.slide.key) : -1;
     if (position >= 0 && !modeChanged) {
-      indexes[mode] = position;
+      var pending = pendingKey === null ? -1 : indexOfKey(list, pendingKey);
+      indexes[mode] = pending >= 0 ? pending : position;
+      if (pendingKey !== null && pending < 0) {
+        // The slide on its way in just left the list, so it must not appear.
+        showToken++;
+        pendingKey = null;
+        advance();
+        return;
+      }
       if (deadline === null && current.slide.duration) arm();
       return;
     }
     if (modeChanged && mode !== 'playlist') indexes[mode] = 0;
     var start = indexes[mode] || 0;
+    if (current && !modeChanged && mode === 'playlist') start = successorIndex(list, start);
     if (start >= list.length) start = 0;
     indexes[mode] = start;
     show(list[start]);
@@ -705,6 +818,7 @@
     lastMessageAt = Date.now();
     var msg;
     try { msg = JSON.parse(ev.data); } catch (e) { return; }
+    if (msg.clock) setClock(msg.clock);
     if (msg.type === 'state') {
       onState(msg, false);
     } else if (msg.type === 'pair') {
@@ -749,7 +863,7 @@
 
   function heartbeat() {
     if (isPreview || !ws || ws.readyState !== 1) return;
-    ws.send(JSON.stringify({ type: 'hb', item: current ? current.slide.name : null }));
+    ws.send(JSON.stringify({ type: 'hb', item: current ? current.slide.name : null, cacheFull: MediaCache.isFull() }));
   }
 
   // ---------- fullscreen ----------
@@ -788,6 +902,7 @@
 
   setupFullscreen();
   if (!isPreview) {
+    loadClock();
     var savedState = load('signage-last-state:' + (slug || ''));
     if (savedState) {
       try { onState(JSON.parse(savedState), true); } catch (e) {}

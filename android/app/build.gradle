@@ -1,0 +1,49 @@
+plugins {
+    id 'com.android.application'
+}
+
+android {
+    namespace 'org.networksignage.kiosk'
+    compileSdk 34
+    buildToolsVersion '34.0.0'
+
+    defaultConfig {
+        applicationId 'org.networksignage.kiosk'
+        // 25 is Fire OS 6. Fire OS 7 is API 28 and Fire OS 8 is API 30.
+        minSdk 25
+        // Stays at 34 on purpose. From 36, predictive back stops delivering the
+        // Back key to dispatchKeyEvent, which press-and-hold depends on, and local
+        // network access starts needing a runtime permission. See android/README.md.
+        targetSdk 34
+        versionCode 1
+        versionName '0.1.0'
+    }
+
+    buildFeatures {
+        buildConfig true
+    }
+
+    buildTypes {
+        release {
+            // No signing config: a release build needs the owner's own key.
+            minifyEnabled false
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+
+    lint {
+        abortOnError true
+        checkDependencies false
+        // The only bitmap is the TV banner, which Android TV specifies at xhdpi. Backup is off,
+        // and the only thing stored is the server's address, so no extraction rules are needed.
+        disable 'IconMissingDensityFolder', 'DataExtractionRules'
+    }
+}
+
+dependencies {
+    testImplementation 'junit:junit:4.13.2'
+}
