@@ -14,6 +14,7 @@
     <string name="setup_address_label">Server address, from Show address and QR code in the signage computer\'s tray menu</string>
     <string name="setup_address_hint">192.168.1.20:8080</string>
     <string name="setup_address_invalid">That doesn\'t look like a server address. Try something like 192.168.1.20:8080.</string>
+    <string name="setup_server_unreachable">Found that server, but this TV can\'t reach it at that address. Try again, or type the address below.</string>
     <string name="setup_connect">Connect</string>
     <string name="setup_cancel">Cancel</string>
     <string name="setup_boot_button">Allow starting after power-on</string>

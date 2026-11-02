@@ -120,9 +120,9 @@ final class ServerDiscovery {
         }
     }
 
-    private static String versionOf(NsdServiceInfo info) {
+    private static String attribute(NsdServiceInfo info, String key) {
         try {
-            byte[] value = info.getAttributes().get("version");
+            byte[] value = info.getAttributes().get(key);
             return value == null ? null : new String(value, StandardCharsets.UTF_8);
         } catch (RuntimeException e) {
             return null; // Some Android versions throw on a malformed TXT record.
@@ -180,7 +180,8 @@ final class ServerDiscovery {
                 clearResolving();
                 if (info.getHost() != null) {
                     found.put(info.getServiceName(), new DiscoveredServer(
-                        info.getServiceName(), info.getHost().getHostAddress(), info.getPort(), versionOf(info)));
+                        info.getServiceName(), info.getHost().getHostAddress(), info.getPort(),
+                        attribute(info, "version"), attribute(info, "id")));
                     listener.onServersChanged(servers());
                 }
                 resolveNext();
