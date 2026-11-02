@@ -1,0 +1,4 @@
+#!/bin/sh
+# Stop a running copy so an upgrade can replace it. It restarts after install.
+/usr/bin/pkill -x "Network Signage" 2>/dev/null
+exit 0

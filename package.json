@@ -1,7 +1,7 @@
 {
   "name": "network-signage",
   "productName": "Network Signage",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "Open-source, self-hosted digital signage for your local network.",
   "license": "MIT",
   "type": "module",
@@ -12,7 +12,7 @@
     "test": "node --test test/",
     "tray": "electron .",
     "icons": "node scripts/make-icons.mjs",
-    "dist:mac": "node scripts/prep-ffmpeg.mjs darwin arm64 && node scripts/prep-ffmpeg.mjs darwin x64 && electron-builder --mac dmg --arm64 --x64",
+    "dist:mac": "node scripts/prep-ffmpeg.mjs darwin arm64 && node scripts/prep-ffmpeg.mjs darwin x64 && electron-builder --mac pkg --arm64 && electron-builder --mac pkg --x64",
     "dist:win": "node scripts/prep-ffmpeg.mjs win32 x64 && electron-builder --win nsis --x64"
   },
   "dependencies": {
@@ -61,11 +61,11 @@
     "artifactName": "Network-Signage-${version}-${os}-${arch}.${ext}",
     "mac": {
       "target": [
-        "dmg"
+        "pkg"
       ],
       "category": "public.app-category.utilities",
       "icon": "build/icon.png",
-      "identity": null,
+      "identity": "-",
       "extendInfo": {
         "LSUIElement": true
       },
@@ -74,10 +74,9 @@
           "from": "bin/darwin-${arch}",
           "to": "ffmpeg"
         }
-      ]
-    },
-    "dmg": {
-      "writeUpdateInfo": false
+      ],
+      "hardenedRuntime": false,
+      "gatekeeperAssess": false
     },
     "win": {
       "target": [
@@ -98,6 +97,13 @@
       "createDesktopShortcut": true,
       "differentialPackage": false
     },
-    "publish": null
+    "publish": null,
+    "pkg": {
+      "installLocation": "/Applications",
+      "isRelocatable": false,
+      "isVersionChecked": false,
+      "overwriteAction": "upgrade",
+      "scripts": "pkg-scripts"
+    }
   }
 }

@@ -6,14 +6,19 @@ It runs on your local network only. There is no cloud service, account, or subsc
 
 ## Install
 
-1. Download the installer for the computer that will stay on: `.dmg` for macOS, `.exe` for Windows.
+1. Download the installer for the computer that will stay on: `.pkg` for macOS (`arm64` for Apple Silicon, `x64` for Intel), `.exe` for Windows.
 2. Run it. The app starts, adds itself to startup, and sits in the menu bar or system tray.
 3. Scan the QR code, or open the admin address it shows, and create the admin account.
 4. On each TV, open the TV address it shows, then pair the TV using the 4-digit code on screen.
 
 See [TV setup](docs/TV-SETUP.md) for Fire TV, Samsung, and LG.
 
-The installers are not code-signed yet. On macOS, right-click the app and choose **Open** the first time. On Windows, choose **More info > Run anyway**. Allow incoming connections when your firewall asks, or TVs cannot connect.
+The installers are not signed with a paid Apple or Microsoft certificate yet, so your computer warns you the first time:
+
+- **macOS:** open the `.pkg`. When macOS blocks it, go to **System Settings > Privacy & Security**, scroll down, choose **Open Anyway**, and confirm. Then run the installer.
+- **Windows:** choose **More info > Run anyway**.
+
+Allow incoming connections when your firewall asks, or TVs cannot connect.
 
 **Give the host computer a fixed IP address** (a DHCP reservation on your router). TVs reach it by address, so they lose it if the address changes.
 
