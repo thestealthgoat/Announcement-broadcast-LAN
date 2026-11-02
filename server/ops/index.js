@@ -4,7 +4,7 @@ import { lanAddresses } from '../lan.js';
 import { createUpdateChecker } from './updates.js';
 import { createAddressWatcher } from './address.js';
 import { createStorageWatcher, formatBytes } from './storage.js';
-import { createDiscovery } from './discovery.js';
+import { createDiscovery, serverId } from './discovery.js';
 import { screensNeedingAttention } from './health.js';
 import { hasPermission } from '../permissions.js';
 
@@ -27,7 +27,7 @@ export function createOps({ db, hub, dataDir, port, host, log, deps = {} }) {
   const address = createAddressWatcher({ db, now, onChange: refresh });
   const storage = createStorageWatcher({ dataDir, statfs: deps.statfs ?? fs.promises.statfs, onChange: refresh });
   const discovery = (deps.discovery ?? reachable)
-    ? createDiscovery({ port, version, log, createBonjour: deps.createBonjour })
+    ? createDiscovery({ port, version, log, now, addresses, id: serverId(db), createBonjour: deps.createBonjour })
     : null;
 
   let timer = null;
@@ -57,8 +57,12 @@ export function createOps({ db, hub, dataDir, port, host, log, deps = {} }) {
   async function run() {
     if (stopped) return;
     const t = now();
-    // A long gap means the computer was asleep, so TVs get a fair chance to reconnect first.
-    if (lastTickAt !== null && t - lastTickAt > RESUME_GAP_MS) watchingSince = t;
+    // A long gap means the computer was asleep, so TVs get a fair chance to reconnect first, and
+    // the rest of the network may have forgotten this service while it was gone.
+    if (lastTickAt !== null && t - lastTickAt > RESUME_GAP_MS) {
+      watchingSince = t;
+      discovery?.republish();
+    }
     lastTickAt = t;
 
     await step(() => {
