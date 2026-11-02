@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    The signage server is plain HTTP on the LAN, and its address is only known at run
+    time, so a domain-specific rule can't cover it. Web slides on plain HTTP need this too.
+    HTTPS still validates against the system certificates.
+-->
+<network-security-config xmlns:tools="http://schemas.android.com/tools">
+    <base-config cleartextTrafficPermitted="true" tools:ignore="InsecureBaseConfiguration">
+        <trust-anchors>
+            <certificates src="system" />
+        </trust-anchors>
+    </base-config>
+</network-security-config>
