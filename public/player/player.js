@@ -2,7 +2,6 @@
 (function () {
   'use strict';
 
-  var FADE_MS = 700;
   var READY_TIMEOUT_MS = 8000;
   var PRELOAD_LEAD_S = 8;
   var STALL_S = 15;
@@ -14,6 +13,7 @@
 
   var Schedule = window.SignageSchedule;
   var Slide = window.SignageSlide;
+  var Transitions = window.SignageTransitions;
 
   var pathParts = location.pathname.split('/');
   var slug = pathParts[1] === 'play' && pathParts[2] ? decodeURIComponent(pathParts[2]) : null;
@@ -46,6 +46,7 @@
   var activeSlides = [];     // playlist slides on at the last check; indexes point into this list
   var ticksSinceCheck = 0;
   var pendingKey = null;     // the slide being loaded to replace the current one
+  var leaving = [];          // slides still on screen while the next one transitions in
 
   // ---------- storage helpers ----------
 
@@ -388,38 +389,37 @@
 
   // ---------- transitions ----------
 
-  function setStyle(el, prop, value) {
-    el.style[prop] = value;
-    el.style['webkit' + prop.charAt(0).toUpperCase() + prop.slice(1)] = value;
+  // The old slide stays up until the new one has fully covered it. A timer disposes of it,
+  // because transitionend can't be relied on.
+  function retire(outgoing, prep, ms) {
+    leaving.push(outgoing);
+    setTimeout(function () {
+      var at = leaving.indexOf(outgoing);
+      if (at >= 0) leaving.splice(at, 1);
+      dispose(outgoing);
+      // If a newer slide has already taken over, this one may be moving out, so leave its styles.
+      if (current === prep) Transitions.settle(prep.layer);
+    }, ms + 100);
+  }
+
+  function disposeLeaving() {
+    var list = leaving;
+    leaving = [];
+    for (var i = 0; i < list.length; i++) dispose(list[i]);
   }
 
   function swapIn(prep) {
     var incoming = prep.layer;
     var outgoing = current;
-    var transition = prep.slide.transition;
     hideIdle();
     pendingKey = null;
     incoming.style.zIndex = String(++zIndex);
     incoming.style.visibility = 'visible';
 
-    if (outgoing && transition !== 'cut') {
-      if (transition === 'slide') {
-        setStyle(incoming, 'transform', 'translateX(100%)');
-      } else {
-        incoming.style.opacity = '0';
-      }
-      void incoming.offsetWidth;
-      setStyle(incoming, 'transition', 'all ' + FADE_MS + 'ms ease');
-      if (transition === 'slide') {
-        setStyle(outgoing.layer, 'transition', 'all ' + FADE_MS + 'ms ease');
-        setStyle(outgoing.layer, 'transform', 'translateX(-100%)');
-        setStyle(incoming, 'transform', 'translateX(0)');
-      } else {
-        incoming.style.opacity = '1';
-      }
-      setTimeout(function () { dispose(outgoing); }, FADE_MS + 100);
-    } else if (outgoing) {
-      dispose(outgoing);
+    if (outgoing) {
+      var ms = Transitions ? Transitions.begin(incoming, outgoing.layer, prep.slide.transition, prep.slide.transitionMs) : 0;
+      if (ms) retire(outgoing, prep, ms);
+      else dispose(outgoing);
     }
 
     current = prep;
@@ -575,6 +575,7 @@
       // Some TVs decode only one video at a time: free the current one and retry.
       if (mayRetry && current && current.el && current.el.tagName === 'VIDEO' && (slide.type === 'video' || slide.type === 'hls')) {
         clearTimeout(endTimer);
+        disposeLeaving();
         dispose(current);
         current = null;
         return showFresh(slide, token, false);
@@ -663,6 +664,7 @@
     prepared = null;
     if (current) dispose(current);
     current = null;
+    disposeLeaving();
     var b = branding();
     if (!idleEl) {
       idleEl = document.createElement('div');

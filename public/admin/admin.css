@@ -108,6 +108,14 @@ input[type=color] { width: 56px; height: 44px; padding: 2px; border: 1px solid v
 .schedule legend { padding: 0 8px 0 0; font-weight: 600; }
 .schedule p { margin: 0 0 8px; }
 .schedule input[type=date], .schedule input[type=time] { min-width: 0; }
+.transition-settings { border: 0; border-top: 1px solid var(--border); margin: 12px 0 4px; padding: 10px 0 0; min-width: 0; }
+.transition-settings legend { padding: 0 8px 0 0; font-weight: 600; }
+.transition-settings p { margin: 8px 0; }
+.transition-settings [hidden] { display: none; }
+.transition-stage { position: relative; width: 100%; max-width: 280px; aspect-ratio: 16/9; margin: 8px 0; border-radius: 8px; overflow: hidden; background: #000; }
+.transition-panel { position: absolute; top: 0; left: 0; width: 100%; height: 100%; display: flex; align-items: center; justify-content: center; font-weight: 600; color: #fff; }
+.transition-panel.first { background: #1d4ed8; }
+.transition-panel.second { background: #b45309; }
 .days { display: flex; gap: 4px; margin-bottom: 4px; }
 .day { flex: 1 1 0; min-width: 0; position: relative; }
 .day input { position: absolute; width: 1px; height: 1px; opacity: 0; }

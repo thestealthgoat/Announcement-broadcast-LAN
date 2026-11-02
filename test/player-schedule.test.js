@@ -8,7 +8,7 @@ import vm from 'node:vm';
 // under the test's control. Text slides appear at once; images wait until the test says they
 // loaded. This covers the player's choices; real browsers and TVs are a separate check.
 const dir = path.join(import.meta.dirname, '..', 'public', 'player');
-const scripts = ['schedule.js', 'slide-render.js', 'player.js'].map((f) => new vm.Script(fs.readFileSync(path.join(dir, f), 'utf8'), { filename: f }));
+const scripts = ['schedule.js', 'slide-render.js', 'transitions.js', 'player.js'].map((f) => new vm.Script(fs.readFileSync(path.join(dir, f), 'utf8'), { filename: f }));
 
 function element(tag) {
   const el = {
