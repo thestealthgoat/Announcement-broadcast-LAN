@@ -92,6 +92,18 @@ Custom roles replace the fixed Admin and Editor pair.
 - **Cleanup:** a cleanup view of items no channel uses, oldest first, showing the space each would free. Nothing is deleted without confirmation.
 - **Duplicates:** warn when an upload matches a file already in the library.
 
+### I. Backup and restore
+
+For moving to a new host computer or recovering from a failed one. Admin only, in Settings.
+
+- **Export:** a Back Up button downloads a single file with a consistent database snapshot, all media, branding files, and a manifest with the app version. It streams, so a large library doesn't fill memory, and it works while TVs keep playing. Live segments and caches are left out.
+- **Import, new computer:** the first-run screen offers Restore from a backup as well as starting fresh. This path only exists while no accounts exist.
+- **Import, existing install:** in Settings, with a clear warning that it replaces everything. A safety copy of the current data is kept until the restored data opens successfully.
+- **Safety:** check the manifest and file contents before changing anything, reject unsafe file paths inside the archive, refuse backups from a newer version, and run migrations on older ones. A failed restore leaves existing data untouched.
+- **After restoring:** the app restarts itself. Accounts and passwords come across, so everyone signs in as before. Paired TVs remember their server by address, so if the new host's address differs, show how to fix it: reserve the old address for the new computer, or re-pair each TV.
+- **Sensitive file:** the backup contains password hashes and all media, so the page says to store it somewhere safe.
+- **Tests:** a full round trip into a new data folder with media and pairing intact, restoring a backup from an older schema, and rejecting corrupted, truncated, and path-traversal archives, all with existing data unchanged.
+
 ## Merge order
 
-First wave: A, then C, then B, then D, onto the `v2` branch. Second wave: G first because it changes permission checks everywhere, then E, F, and H in parallel. After each wave comes a full review, every automated check, a scripted browser pass, and installers. The result goes up as a pull request.
+First wave: A, then C, then B, then D, onto the `v2` branch. Second wave: G first because it changes permission checks everywhere, then E, F, H, and I in parallel. After each wave comes a full review, every automated check, a scripted browser pass, and installers. The result goes up as a pull request.
