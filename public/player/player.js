@@ -13,6 +13,7 @@
   var CLOCK_KEY = 'signage-clock-offset';
 
   var Schedule = window.SignageSchedule;
+  var Slide = window.SignageSlide;
 
   var pathParts = location.pathname.split('/');
   var slug = pathParts[1] === 'play' && pathParts[2] ? decodeURIComponent(pathParts[2]) : null;
@@ -215,6 +216,8 @@
       if (s.src && s.src.indexOf('/media/') === 0 && (!s.size || s.size <= MAX_CACHE_FILE) && urls.indexOf(s.src) < 0) {
         urls.push(s.src);
       }
+      var picture = s.style && s.style.imageUrl;
+      if (picture && urls.indexOf(picture) < 0) urls.push(picture);
     }
     return urls;
   }
@@ -223,12 +226,6 @@
 
   var appliedFont = null;
 
-  function fontFamily(b) {
-    if (b.fontMode === 'google' && b.fontFamily) return '"' + b.fontFamily + '", sans-serif';
-    if (b.fontMode === 'upload' && b.fontFile) return 'SignageCustom, sans-serif';
-    return '';
-  }
-
   function applyBranding(b) {
     if (!b) return;
     messageEl.style.background = b.primaryColor;
@@ -236,21 +233,7 @@
     var marker = b.fontMode + '|' + b.fontFamily + '|' + b.fontFile;
     if (marker === appliedFont) return;
     appliedFont = marker;
-    var old = document.getElementById('brand-font');
-    if (old) old.parentNode.removeChild(old);
-    var el;
-    if (b.fontMode === 'google' && b.fontFamily) {
-      el = document.createElement('link');
-      el.rel = 'stylesheet';
-      el.href = 'https://fonts.googleapis.com/css?family=' + encodeURIComponent(b.fontFamily) + ':400,600,700&display=swap';
-    } else if (b.fontMode === 'upload' && b.fontFile) {
-      el = document.createElement('style');
-      el.appendChild(document.createTextNode('@font-face{font-family:SignageCustom;src:url("' + b.fontFile + '");font-display:swap}'));
-    }
-    if (el) {
-      el.id = 'brand-font';
-      document.getElementsByTagName('head')[0].appendChild(el);
-    }
+    if (Slide) Slide.applyFont(document, b);
   }
 
   function branding() {
@@ -258,35 +241,6 @@
   }
 
   // ---------- slide elements ----------
-
-  function makeText(slide) {
-    var b = branding();
-    var root = document.createElement('div');
-    root.className = 'text-slide';
-    root.style.background = b.primaryColor;
-    root.style.color = b.textColor;
-    var font = fontFamily(b);
-    if (font) root.style.fontFamily = font;
-    var rule = document.createElement('div');
-    rule.className = 'rule';
-    rule.style.background = b.accentColor;
-    root.appendChild(rule);
-    var h = document.createElement('h1');
-    h.textContent = slide.title || '';
-    root.appendChild(h);
-    if (slide.body) {
-      var p = document.createElement('p');
-      p.textContent = slide.body;
-      root.appendChild(p);
-    }
-    if (b.logo) {
-      var logo = document.createElement('img');
-      logo.className = 'logo';
-      logo.src = b.logo;
-      root.appendChild(logo);
-    }
-    return root;
-  }
 
   function loadHls(cb) {
     if (window.Hls) return cb();
@@ -327,10 +281,12 @@
       finish(slide.type === 'web' || slide.type === 'text');
     }, READY_TIMEOUT_MS);
 
-    if (slide.type === 'text') {
-      prep.el = makeText(slide);
+    if (slide.type === 'text' && Slide) {
+      prep.view = Slide.render(slide, branding(), { now: wallMs, resolve: MediaCache.resolve });
+      prep.el = prep.view.el;
       layer.appendChild(prep.el);
-      finish(true);
+      prep.view.fit();
+      prep.view.whenReady(function () { finish(true); });
     } else if (slide.type === 'image') {
       var img = document.createElement('img');
       prep.el = img;
@@ -505,6 +461,10 @@
     return clockOffset === null ? Schedule.localClock(new Date()) : Schedule.formatWall(Date.now() + clockOffset);
   }
 
+  function wallMs() {
+    return Schedule ? Schedule.parseWall(wallNow()) : null;
+  }
+
   function scheduledSlides() {
     var out = [];
     var wall = null;
@@ -676,6 +636,7 @@
       reconcile();
     }
     if (++ticksSinceCheck >= SCHEDULE_CHECK_TICKS) checkSchedule();
+    if (current && current.view) current.view.tick();
     var left = remainingSeconds();
     if (left !== null && left <= PRELOAD_LEAD_S) prepareNext();
 
@@ -712,8 +673,7 @@
     idleEl.style.background = b.primaryColor;
     idleEl.style.color = b.textColor;
     idleEl.style.display = '';
-    var font = fontFamily(b);
-    idleEl.style.fontFamily = font || '';
+    idleEl.style.fontFamily = Slide ? Slide.fontFamily(b) : '';
     if (b.logo) {
       var img = document.createElement('img');
       img.src = b.logo;

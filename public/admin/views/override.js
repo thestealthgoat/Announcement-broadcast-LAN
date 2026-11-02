@@ -1,14 +1,20 @@
 import { h, api, guard, field, checkbox, toast, thumb, TYPE_LABEL } from '../lib.js';
+import { createDesigner, loadDesignerData } from '../designer.js';
 
-export async function overrideView(main) {
-  const [channels, media] = await Promise.all([api.get('/api/channels'), api.get('/api/media')]);
+export async function overrideView(main, ctx) {
+  const [channels, media, designerData] = await Promise.all([api.get('/api/channels'), api.get('/api/media'), loadDesignerData()]);
   const ready = media.filter((m) => m.status === 'ready');
   let kind = 'text';
   let target = 'all';
   let picked = null;
 
-  const title = h('input', { type: 'text', maxlength: 200, placeholder: 'Game moved to the main gym' });
-  const body = h('textarea', { maxlength: 2000, placeholder: 'Optional details' });
+  const title = h('input', { type: 'text', maxlength: 200, placeholder: 'Game moved to the main gym', oninput: () => designer.update() });
+  const body = h('textarea', { maxlength: 2000, placeholder: 'Optional details', oninput: () => designer.update() });
+  const designer = createDesigner({
+    data: designerData,
+    canManage: ctx.can('settings.manage'),
+    getText: () => ({ title: title.value, body: body.value }),
+  });
   const minutes = h('input', { type: 'number', min: 1, max: 1440, placeholder: 'Until cleared', inputmode: 'numeric' });
   const sound = checkbox('Play sound (TV browsers may block this)', {});
   const channelBoxes = channels.map((c) => ({ c, box: h('input', { type: 'checkbox', value: c.id }) }));
@@ -33,7 +39,7 @@ export async function overrideView(main) {
 
   function drawContent() {
     if (kind === 'text') {
-      contentEl.replaceChildren(field('Message', title), field('Details', body));
+      contentEl.replaceChildren(designer.chips, field('Message', title), field('Details', body), designer.preview, designer.controls);
       return;
     }
     contentEl.replaceChildren(ready.length
@@ -75,6 +81,7 @@ export async function overrideView(main) {
           if (kind === 'text') {
             payload.title = title.value;
             payload.body = body.value;
+            payload.style = designer.getStyle();
           } else {
             if (!picked) throw new Error('Choose a library item.');
             payload.mediaId = picked;
@@ -82,6 +89,7 @@ export async function overrideView(main) {
           await api.post('/api/overrides', payload);
           title.value = '';
           body.value = '';
+          designer.update();
           toast('Override is live.');
         });
       },
@@ -99,5 +107,10 @@ export async function overrideView(main) {
   );
   drawContent();
   await drawActive();
-  return { refresh: (s) => s.includes('overrides') && guard(drawActive) };
+  return {
+    refresh: (s) => {
+      if (s.includes('overrides')) guard(drawActive);
+      if (s.includes('templates')) designer.reloadTemplates();
+    },
+  };
 }

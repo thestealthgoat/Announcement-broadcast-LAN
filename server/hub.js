@@ -1,6 +1,7 @@
 import { randomInt } from 'node:crypto';
 import { VERSION } from './version.js';
 import { wallClock } from './schedule.js';
+import { parseStyle, resolveStyle, styleKey } from './slide-style.js';
 
 const PING_MS = 15000;
 const DEAD_MS = 45000;
@@ -13,8 +14,13 @@ function scheduleOf(r) {
   return { startDate: r.start_date, endDate: r.end_date, startTime: r.start_time, endTime: r.end_time, days: r.days };
 }
 
+// A text slide's key and style. A slide with no style keeps the key it has always had.
+function styled(key, style) {
+  return style ? { key: `${key}:${styleKey(style)}`, style } : { key };
+}
+
 // Turns one library item into the slides a player shows. A PDF becomes one slide per page.
-export function toSlides(media, placement) {
+export function toSlides(media, placement, styleOf = parseStyle) {
   const base = {
     mediaId: media.id,
     type: media.type,
@@ -47,7 +53,7 @@ export function toSlides(media, placement) {
     case 'hls':
       return [{ ...base, key, src: media.url, duration: placement.duration ?? DEFAULT_LIVE_SECONDS }];
     case 'text':
-      return [{ ...base, key, title: media.title ?? '', body: media.body ?? '', duration: still }];
+      return [{ ...base, ...styled(key, styleOf(media.style)), title: media.title ?? '', body: media.body ?? '', duration: still }];
     default:
       return [];
   }
@@ -65,6 +71,7 @@ export function createHub(db, log, isAvailable = () => true) {
   const send = (socket, msg) => {
     if (socket.readyState === 1) socket.send(JSON.stringify(msg));
   };
+  const styleOf = (json) => resolveStyle(db, json);
 
   function activeOverrides() {
     const now = Date.now();
@@ -87,13 +94,13 @@ export function createHub(db, log, isAvailable = () => true) {
       if (o.media_id) {
         const media = db.get("SELECT * FROM media WHERE id = ? AND status = 'ready'", o.media_id);
         if (!media) continue;
-        slides = isAvailable(media.id) ? toSlides(media, placement) : [{
+        slides = isAvailable(media.id) ? toSlides(media, placement, styleOf) : [{
           key: `o${o.id}:waiting`, mediaId: media.id, type: 'text', name: media.name,
           title: 'Waiting for the live feed', body: '', transition: 'cut', audio: false, duration: DEFAULT_STILL_SECONDS,
         }];
       } else {
         slides = [{
-          key: `o${o.id}`, mediaId: null, type: 'text', name: o.title || 'Announcement',
+          ...styled(`o${o.id}`, styleOf(o.style)), mediaId: null, type: 'text', name: o.title || 'Announcement',
           title: o.title ?? '', body: o.body ?? '', transition: 'cut', audio: false, duration: DEFAULT_STILL_SECONDS,
         }];
       }
@@ -112,7 +119,7 @@ export function createHub(db, log, isAvailable = () => true) {
       channel.id,
     );
     const slides = rows.filter((r) => isAvailable(r.id)).flatMap((r) =>
-      toSlides(r, { key: `p${r.pid}`, duration: r.p_duration, transition: r.transition, audio: r.audio, schedule: scheduleOf(r) }),
+      toSlides(r, { key: `p${r.pid}`, duration: r.p_duration, transition: r.transition, audio: r.audio, schedule: scheduleOf(r) }, styleOf),
     );
     return {
       type: 'state',

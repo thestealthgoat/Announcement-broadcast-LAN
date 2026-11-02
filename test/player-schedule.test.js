@@ -8,7 +8,7 @@ import vm from 'node:vm';
 // under the test's control. Text slides appear at once; images wait until the test says they
 // loaded. This covers the player's choices; real browsers and TVs are a separate check.
 const dir = path.join(import.meta.dirname, '..', 'public', 'player');
-const scripts = ['schedule.js', 'player.js'].map((f) => new vm.Script(fs.readFileSync(path.join(dir, f), 'utf8'), { filename: f }));
+const scripts = ['schedule.js', 'slide-render.js', 'player.js'].map((f) => new vm.Script(fs.readFileSync(path.join(dir, f), 'utf8'), { filename: f }));
 
 function element(tag) {
   const el = {
@@ -84,6 +84,17 @@ test('the TV follows the host clock, not its own', (t) => {
   const tv = boot();
   tv.receive(state('2026-11-02T12:00:00', [slide('off', before('11:00')), slide('on', after('11:00'))]));
   assert.equal(tv.showing(), 'on');
+});
+
+test('a countdown runs on the host clock, not the TV\'s, and ends plainly', (t) => {
+  const pass = clock(t);
+  const tv = boot();
+  tv.receive(state('2026-11-02T11:59:50', [{ ...slide('Kickoff'), style: { countdown: '2026-11-02T12:00' } }]));
+  assert.equal(tv.showing(), 'Kickoff00:10');
+  pass(4);
+  assert.equal(tv.showing(), 'Kickoff00:06');
+  pass(10);
+  assert.equal(tv.showing(), "Kickoff" + "Time's up");
 });
 
 test('a schedule ending mid-slide moves on within about 15 seconds, without waiting out the duration', (t) => {
