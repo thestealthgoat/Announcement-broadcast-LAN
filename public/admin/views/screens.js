@@ -5,6 +5,7 @@ export async function screensView(main, ctx) {
   const info = await guard(() => api.get('/api/info'));
   const base = info?.urls[0] ?? location.origin;
   const listEl = h('div', { class: 'list' });
+  const attentionEl = h('section', { class: 'card', hidden: true });
   let channels = [];
 
   const code = h('input', { type: 'text', inputmode: 'numeric', maxlength: 4, placeholder: '1234', required: true, 'aria-label': 'Code on the TV' });
@@ -17,6 +18,18 @@ export async function screensView(main, ctx) {
     const chosen = channel.value;
     channel.replaceChildren(...channels.map((c) => h('option', { value: c.id }, c.name)));
     if (chosen) channel.value = chosen;
+
+    const missing = screens.filter((s) => s.needsAttention);
+    attentionEl.hidden = !isAdmin || !missing.length;
+    attentionEl.replaceChildren(
+      h('h2', {}, 'Needs attention'),
+      h('p', { class: 'muted small' }, 'These TVs have been offline for more than 5 minutes. Check that they are turned on and connected. If one is gone for good, remove it below.'),
+      ...missing.map((s) => h('div', { class: 'attention-row' },
+        h('span', { class: 'dot', 'aria-hidden': 'true' }),
+        h('span', { class: 'grow' }, h('strong', {}, s.name), s.channelName && ` on ${s.channelName}`),
+        h('span', { class: 'muted small' }, `last seen ${ago(s.lastSeen)}`),
+      )),
+    );
 
     if (document.activeElement?.closest?.('.screen-row')) return;
     listEl.replaceChildren(...(screens.length ? screens.map(row) : [
@@ -33,6 +46,8 @@ export async function screensView(main, ctx) {
       h('div', { class: 'grow', style: 'flex-basis:160px' },
         h('div', { class: 'title' }, s.name),
         h('div', { class: 'muted small' }, status),
+        s.storageFull && h('div', { class: 'small warn-text' }, 'Storage full on this TV'),
+        s.storageFull && h('div', { class: 'muted small' }, 'It streams instead of saving, so it may stop during a network drop.'),
       ),
       isAdmin ? [
         h('select', {
@@ -86,6 +101,7 @@ export async function screensView(main, ctx) {
         h('button', { type: 'submit', class: 'primary' }, 'Pair'),
       ),
     ),
+    attentionEl,
     h('section', {}, listEl),
   );
   await refresh();

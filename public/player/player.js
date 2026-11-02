@@ -200,7 +200,7 @@
       });
     }
 
-    return { resolve: resolve, sync: sync };
+    return { resolve: resolve, sync: sync, isFull: function () { return full; } };
   })();
 
   function cacheableUrls() {
@@ -839,7 +839,7 @@
 
   function heartbeat() {
     if (isPreview || !ws || ws.readyState !== 1) return;
-    ws.send(JSON.stringify({ type: 'hb', item: current ? current.slide.name : null }));
+    ws.send(JSON.stringify({ type: 'hb', item: current ? current.slide.name : null, cacheFull: MediaCache.isFull() }));
   }
 
   // ---------- fullscreen ----------
