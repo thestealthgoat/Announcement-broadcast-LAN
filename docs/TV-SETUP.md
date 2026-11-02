@@ -9,6 +9,14 @@ There are two ways to connect a TV:
 
 Bookmark the address on the TV. Pairing is remembered in that browser.
 
+## Which device do I need?
+
+**Roku TVs and Apple TV have no real web browser**, so they can't run the player directly. Plug a Fire TV Stick or a computer into the TV's HDMI port and select that input. On a Roku TV, you may be able to make it open on that input at power-on, under **Settings > System > Power > Power On**.
+
+**When buying a Fire TV Stick, check that it runs Fire OS.** The 4K Max is tested and has the most storage. Avoid the 4K Select and other Vega OS models, because they block the normal way of installing kiosk browsers like Fully Kiosk.
+
+See [test status](TEST-STATUS.md) for what has been tested so far.
+
 ## Fire TV Stick (recommended): Fully Kiosk Browser
 
 Fully Kiosk is the best fit. It starts on boot, keeps the screen on, reloads after errors, and can allow video sound. It is a third-party app, and some features need a paid license from its developer.

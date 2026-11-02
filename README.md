@@ -22,6 +22,8 @@ Allow incoming connections when your firewall asks, or TVs cannot connect.
 
 **Give the host computer a fixed IP address** (a DHCP reservation on your router). TVs reach it by address, so they lose it if the address changes.
 
+See [test status](docs/TEST-STATUS.md) for what has been tested so far.
+
 ## What it does
 
 - **Channels:** a channel is a named playlist. Each TV plays one channel, and many TVs can share one.
