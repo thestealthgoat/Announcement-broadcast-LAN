@@ -66,7 +66,7 @@ async function json(url, body) {
 }
 
 async function uploadPdf(file, query, onProgress, onStatus) {
-  onStatus('Reading PDF…');
+  onStatus('Reading PDF… Keep this page open and on screen until it finishes.');
   const pdfjs = await import('/vendor/pdf.min.mjs');
   pdfjs.GlobalWorkerOptions.workerSrc = '/vendor/pdf.worker.min.mjs';
   const task = pdfjs.getDocument({ data: await file.arrayBuffer() });
@@ -74,7 +74,7 @@ async function uploadPdf(file, query, onProgress, onStatus) {
   const item = await json('/api/media/pdf', { name: file.name.replace(/\.pdf$/i, '').slice(0, 120) || 'PDF', pages: doc.numPages });
   try {
     for (let n = 1; n <= doc.numPages; n++) {
-      onStatus(`Page ${n} of ${doc.numPages}…`);
+      onStatus(`Page ${n} of ${doc.numPages}… Keep this page open and on screen.`);
       const page = await doc.getPage(n);
       const base = page.getViewport({ scale: 1 });
       const viewport = page.getViewport({ scale: Math.min(MAX_W / base.width, MAX_H / base.height) });
