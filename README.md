@@ -31,11 +31,46 @@ See [test status](docs/TEST-STATUS.md) for what has been tested so far.
 - **Per item:** duration, transition (cut, fade, slide), sound (off by default), and show/hide. Drag to reorder, with a live preview.
 - **Video:** every upload is converted to H.264/AAC MP4 for TV compatibility.
 - **Override:** one click puts a message or library item on all or selected channels, until cleared or for a set number of minutes.
+- **Live feeds:** show OBS, vMix, or a capture card on your TVs. See [Live feed](#live-feed).
 - **Users:** admins do everything. Editors manage content on their assigned channels. Override is a separate permission.
 - **Branding:** organization name, logo, colors, and font.
 - **Resilient TVs:** changes arrive instantly with no refresh. TVs cache media and keep playing through network drops, then reconnect on their own.
 
 YouTube is intentionally not supported.
+
+## Live feed
+
+An admin creates a feed under **Live Feeds**. It then appears in the Library, and anyone can add it to their channels like any other item. For several live views, such as Program and Multiview, use one feed and one channel for each.
+
+A feed only shows on TVs while it is on air. While it's down, TVs keep rotating through the rest of the channel, and they pick the feed up as soon as it returns. An override on a feed that's down shows "Waiting for the live feed", then switches to the video when it starts.
+
+### Set up OBS or vMix
+
+Create the feed first. The **Live Feeds** page shows the exact address to use, with your computer's address and the feed's port filled in.
+
+**RTMP**
+
+- **OBS:** go to **Settings > Stream**, choose **Custom** as the service, then paste the **Server** and **Stream key** from the Live Feeds page.
+- **vMix:** go to **Settings > Streaming**, choose **Custom RTMP Server**, then paste the server as the URL and the stream key as the stream name.
+
+**SRT** is offered only if this computer's copy of ffmpeg supports it. If you don't see it as an option, use RTMP. Set the sender to **Caller** mode, with the address shown on the Live Feeds page.
+
+**Capture cards and cameras** are listed if your system exposes them, which needs the card's driver for DeckLink and Magewell. On a Mac, the first use may need camera permission: go to **System Settings > Privacy & Security > Camera** and turn on Network Signage.
+
+Turn on automatic reconnect in your sender. The feed stops listening for a moment each time a sender disconnects, so a reconnect can take a second try.
+
+### Security
+
+- **Never port-forward a feed's port.** The app's local network filter covers its web pages and video, but not these ports, because ffmpeg listens on them directly. Anyone who can reach the port can send video to your TVs. The stream key is not a password, because ffmpeg accepts any key.
+- **Anyone on your network can watch a channel,** including its live feeds, since TV addresses don't require signing in.
+
+### Network load
+
+Each TV downloads its own copy of the video. As a rule of thumb, multiply the feed's maximum quality by the number of TVs showing it: 10 TVs at 6 Mbps is 60 Mbps, all leaving the host computer. Connect the host by Ethernet, and be careful with many TVs on one Wi-Fi access point. Lower the maximum quality on the feed if video stutters.
+
+### Latency
+
+In testing with a synthetic source on the host computer, a frame took about 1 to 2 seconds to reach the playlist, and about 3 to 5 seconds to reach the screen in a desktop browser. Real TVs and networks may differ.
 
 ## Good to know
 
@@ -94,14 +129,11 @@ Both work from a Mac, because the app has no native Node modules. Output goes to
 | Path | Purpose |
 | --- | --- |
 | `server/` | Fastify API, SQLite (`node:sqlite`), WebSocket hub, ffmpeg queue |
+| `server/live/` | Live feeds: one supervised ffmpeg per feed, and capability probing |
 | `public/player/` | TV player. Strict ES5 with no build step, for old TV browsers (a test enforces this) |
 | `public/admin/` | Mobile-first admin. Plain ES modules with no build step |
 | `electron/` | Tray app |
 | `test/` | Integration tests against a real server, ffmpeg, and WebSockets |
-
-### Live feeds (phase 2)
-
-The player already handles HLS: an item whose address ends in `.m3u8` plays as a live stream, natively or through hls.js. Capture and encoding are not built yet.
 
 ## License
 

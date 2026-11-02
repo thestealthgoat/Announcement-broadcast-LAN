@@ -7,6 +7,7 @@ import { uploadView } from './views/uploadPage.js';
 import { overrideView } from './views/override.js';
 import { usersView } from './views/users.js';
 import { settingsView } from './views/settings.js';
+import { liveView } from './views/live.js';
 
 const root = document.getElementById('app');
 const ICONS = {
@@ -14,6 +15,7 @@ const ICONS = {
   channels: 'M4 6h16M4 12h16M4 18h10',
   library: 'M4 4h16v16H4zM4 16l5-5 4 4 3-3 4 4M9 9h.01',
   override: 'M12 3 2 20h20L12 3zM12 10v4M12 17h.01',
+  live: 'M3 7h13v10H3zM16 11l5-3v8l-5-3',
   users: 'M16 20v-1a4 4 0 0 0-8 0v1M12 11a3 3 0 1 0 0-6 3 3 0 0 0 0 6z',
   settings: 'M4 7h10M18 7h2M4 17h2M10 17h10M16 5v4M8 15v4',
 };
@@ -27,6 +29,7 @@ function navItems() {
     ['#/channels', 'Channels', ICONS.channels],
     ['#/library', 'Library', ICONS.library],
     ctx.me.canOverride && ['#/override', 'Override', ICONS.override],
+    ctx.me.role === 'admin' && ['#/live', 'Live Feeds', ICONS.live],
     ctx.me.role === 'admin' && ['#/users', 'Users', ICONS.users],
     ['#/settings', 'Settings', ICONS.settings],
   ].filter(Boolean);
@@ -49,6 +52,7 @@ function route() {
     case 'upload': return uploadView;
     case 'override': return ctx.me.canOverride ? overrideView : screensView;
     case 'users': return admin ? usersView : screensView;
+    case 'live': return admin ? liveView : screensView;
     case 'settings': return settingsView;
     default: return screensView;
   }

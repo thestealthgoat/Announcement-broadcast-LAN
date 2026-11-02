@@ -9,6 +9,7 @@ import cookie from '@fastify/cookie';
 import { openDb } from './db.js';
 import { createHub } from './hub.js';
 import { createProcessor, resolveFfmpeg } from './media.js';
+import { createLiveFeeds } from './live/supervisor.js';
 import { isLocalAddress, baseUrls } from './lan.js';
 import { userFromToken, httpError, createLoginLimiter, COOKIE } from './auth.js';
 import { listAdmins, resetAdminPassword } from './recovery.js';
@@ -19,6 +20,7 @@ import mediaRoutes from './routes/media.js';
 import screenRoutes from './routes/screens.js';
 import overrideRoutes from './routes/overrides.js';
 import settingsRoutes from './routes/settings.js';
+import liveRoutes from './routes/live.js';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const MAX_UPLOAD = 20 * 1024 ** 3;
@@ -51,8 +53,9 @@ export async function createServer({ dataDir, port = 8080, host = '0.0.0.0', ffm
 
   const app = Fastify({ logger, bodyLimit: 1024 * 1024 });
   const db = openDb(path.join(dataDir, 'signage.db'));
-  const hub = createHub(db, app.log);
+  const hub = createHub(db, app.log, (mediaId) => live.isAvailable(mediaId));
   const processor = createProcessor({ db, hub, mediaDir, ffmpeg, log: app.log });
+  const live = createLiveFeeds({ db, hub, dataDir, ffmpeg, log: app.log });
 
   app.decorateRequest('user', null);
   await app.register(cookie);
@@ -88,7 +91,7 @@ export async function createServer({ dataDir, port = 8080, host = '0.0.0.0', ffm
 
   const portRef = () => app.server.address()?.port ?? port;
   const limiter = createLoginLimiter();
-  const ctx = { db, hub, processor, mediaDir, port: portRef, limiter };
+  const ctx = { db, hub, processor, live, mediaDir, port: portRef, limiter };
   await app.register(authRoutes, ctx);
   await app.register(userRoutes, ctx);
   await app.register(channelRoutes, ctx);
@@ -96,6 +99,7 @@ export async function createServer({ dataDir, port = 8080, host = '0.0.0.0', ffm
   await app.register(screenRoutes, ctx);
   await app.register(overrideRoutes, ctx);
   await app.register(settingsRoutes, ctx);
+  await app.register(liveRoutes, ctx);
 
   // TVs do not sign in: each one identifies itself and receives only its channel.
   app.register(async (scope) => {
@@ -118,6 +122,20 @@ export async function createServer({ dataDir, port = 8080, host = '0.0.0.0', ffm
     immutable: true,
     maxAge: '365d',
   });
+  // Live video changes every second, so nothing here may be cached or revalidated.
+  await app.register(fastifyStatic, {
+    root: live.liveDir,
+    prefix: '/live/',
+    decorateReply: false,
+    cacheControl: false,
+    etag: false,
+    lastModified: false,
+    setHeaders: (reply, file) => {
+      reply.header('Cache-Control', 'no-store');
+      if (file.endsWith('.m3u8')) reply.header('Content-Type', 'application/vnd.apple.mpegurl');
+      else if (file.endsWith('.ts')) reply.header('Content-Type', 'video/mp2t');
+    },
+  });
 
   const sendPlayer = (req, reply) => reply.sendFile('player/index.html');
   app.get('/', (req, reply) => reply.redirect('/admin/'));
@@ -138,12 +156,13 @@ export async function createServer({ dataDir, port = 8080, host = '0.0.0.0', ffm
   });
 
   app.addHook('onClose', async () => {
+    await live.stop();
     processor.stop();
     hub.closeAll();
   });
 
   return {
-    app, db, hub, processor,
+    app, db, hub, processor, live,
     listAdmins: () => listAdmins(db),
     async resetAdminPassword(userId) {
       const temp = await resetAdminPassword(db, userId);
@@ -153,6 +172,7 @@ export async function createServer({ dataDir, port = 8080, host = '0.0.0.0', ffm
     async start() {
       await app.listen({ port, host });
       processor.resume();
+      live.start();
       hub.scheduleOverrideExpiry();
       return { port: portRef(), urls: baseUrls(portRef()) };
     },
