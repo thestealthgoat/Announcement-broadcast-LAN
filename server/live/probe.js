@@ -83,17 +83,26 @@ function run(ffmpeg, args, { timeout, signal }) {
     child.stdout.on('data', (d) => { output += d; });
     child.stderr.on('data', (d) => { output += d; });
     child.on('error', () => {});
-    child.on('close', (code) => resolve({ code, output }));
+    child.on('close', (code) => resolve({ code, output })); // code is null if the timeout killed it
   });
 }
 
 const cache = new Map(); // finished results by ffmpeg path, so each is probed once per run
 
-export async function probeCapabilities(ffmpeg, { signal } = {}) {
+// A busy computer can time out, and that says nothing about what ffmpeg supports. Treating it as
+// "no RTMP, no SRT" would turn feeds off until a restart, so it's a failure, and never cached.
+async function list(ffmpeg, flag, parse, isEmpty, opts) {
+  const { code, output } = await run(ffmpeg, ['-hide_banner', flag], opts);
+  const parsed = parse(output);
+  if (code !== 0 || isEmpty(parsed)) throw new Error(`Could not list ffmpeg's ${flag.slice(1)}`);
+  return parsed;
+}
+
+export async function probeCapabilities(ffmpeg, { signal, listMs = LIST_MS } = {}) {
   if (cache.has(ffmpeg)) return cache.get(ffmpeg);
-  const opts = { timeout: LIST_MS, signal };
-  const protocols = parseProtocols((await run(ffmpeg, ['-hide_banner', '-protocols'], opts)).output);
-  const listed = parseEncoders((await run(ffmpeg, ['-hide_banner', '-encoders'], opts)).output);
+  const opts = { timeout: listMs, signal };
+  const protocols = await list(ffmpeg, '-protocols', parseProtocols, (p) => !p.input.length, opts);
+  const listed = await list(ffmpeg, '-encoders', parseEncoders, (e) => !e.length, opts);
   const encoders = [];
   for (const id of Object.keys(ENCODERS)) {
     if (!listed.includes(id)) continue;

@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
 import { parseProtocols, parseEncoders, parseAvfoundationDevices, parseDshowDevices } from '../server/live/probe.js';
 import { feedArgs, inputArgs, classifyFailure, isSenderDisconnect, playlistSegments, senderAddress, ENCODERS } from '../server/live/ffmpeg-args.js';
 
@@ -142,10 +143,22 @@ test('a listener losing its sender is routine; a device stopping is not', () => 
 
 test('sender addresses and playlist counting', () => {
   assert.deepEqual(senderAddress({ input: 'rtmp', port: 1935 }, '192.168.1.20'), {
-    url: 'rtmp://192.168.1.20:1935/live', key: 'feed', full: 'rtmp://192.168.1.20:1935/live/feed',
+    url: 'rtmp://192.168.1.20:1935/live', streamName: 'feed', full: 'rtmp://192.168.1.20:1935/live/feed',
   });
   assert.equal(senderAddress({ input: 'srt', port: 9000 }, '192.168.1.20').url, 'srt://192.168.1.20:9000?mode=caller');
   assert.equal(senderAddress({ input: 'device', device: 'Cam' }, 'x'), null);
   assert.equal(playlistSegments('#EXTM3U\n#EXTINF:1.0,\na.ts\n#EXTINF:1.0,\nb.ts\n'), 2);
   assert.equal(playlistSegments(''), 0);
+});
+
+test('the Live Feeds page says plainly who can send video, and the key is not presented as a credential', () => {
+  const page = fs.readFileSync(new URL('../public/admin/views/live.js', import.meta.url), 'utf8');
+  assert.match(page, /Anyone on the network who can reach a feed\\'s port can send video to this feed/);
+  assert.match(page, /not a password/);
+  assert.match(page, /separate network/);
+  assert.doesNotMatch(page, /address\.key/);
+  assert.doesNotMatch(page, /'Stream key: '/);
+  const readme = fs.readFileSync(new URL('../README.md', import.meta.url), 'utf8');
+  assert.match(readme, /Anyone on the network who can reach a feed's port can send video to this feed/);
+  assert.match(readme, /separate network/);
 });

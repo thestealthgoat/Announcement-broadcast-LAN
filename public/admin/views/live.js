@@ -17,7 +17,8 @@ function addressBlock(feed) {
   if (feed.input === 'rtmp') {
     return h('div', { class: 'small' },
       h('div', {}, 'Server: ', h('span', { class: 'code' }, feed.address.url)),
-      h('div', {}, 'Stream key: ', h('span', { class: 'code' }, feed.address.key)),
+      h('div', {}, 'Stream key box in OBS or vMix: ', h('span', { class: 'code' }, feed.address.streamName)),
+      h('div', { class: 'muted' }, 'This only fills in the box. It is not a password, and it keeps nobody out.'),
     );
   }
   return h('div', { class: 'small' }, 'Address: ', h('span', { class: 'code' }, feed.address.url));
@@ -136,7 +137,11 @@ export async function liveView(main) {
   main.replaceChildren(
     h('div', { class: 'page-head' }, h('h1', {}, 'Live Feeds'),
       h('button', { class: 'primary', onclick: () => guard(() => dialog(null)) }, 'New live feed')),
-    h('p', { class: 'muted' }, 'A live feed appears in the Library, so anyone can add it to their channels. It only shows on TVs while it is on air. Never forward these ports on your router.'),
+    h('p', { class: 'muted' }, 'A live feed appears in the Library, so anyone can add it to their channels. It only shows on TVs while it is on air.'),
+    h('div', { class: 'card', role: 'note' },
+      h('p', { style: 'margin-top:0;font-weight:600' }, 'Anyone on the network who can reach a feed\'s port can send video to this feed.'),
+      h('p', { style: 'margin-bottom:0' }, 'If nothing is sending, whatever they send plays on your TVs. There is no password on it. Never forward these ports on your router. If guests or the public share this network, put this computer and the one sending the video, such as the production trailer, on their own separate network.'),
+    ),
     listEl,
   );
   await refresh();

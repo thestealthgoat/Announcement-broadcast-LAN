@@ -14,6 +14,10 @@ public class ServerPickerTest {
         return new DiscoveredServer(name, host, 8080, "2.0.0");
     }
 
+    private static DiscoveredServer withId(String name, String host, String id) {
+        return new DiscoveredServer(name, host, 8080, "2.0.0", id);
+    }
+
     private static ServerAddress address(String raw) {
         return ServerAddress.parse(raw);
     }
@@ -46,35 +50,79 @@ public class ServerPickerTest {
 
     @Test
     public void followsTheSavedServiceToItsNewAddress() {
-        ServerAddress moved = ServerPicker.followSaved("Office",
+        ServerAddress moved = ServerPicker.followSaved(null, "Office",
             address("10.0.0.1:8080"), Arrays.asList(server("Other", "10.0.0.7"), server("Office", "10.0.0.2")));
         assertEquals(address("10.0.0.2:8080"), moved);
     }
 
     @Test
     public void staysPutWhenTheAddressIsUnchanged() {
-        assertNull(ServerPicker.followSaved("Office",
+        assertNull(ServerPicker.followSaved(null, "Office",
             address("10.0.0.1:8080"), Collections.singletonList(server("Office", "10.0.0.1"))));
     }
 
     @Test
     public void neverJumpsToADifferentServer() {
-        assertNull(ServerPicker.followSaved("Office",
+        assertNull(ServerPicker.followSaved(null, "Office",
             address("10.0.0.1:8080"), Collections.singletonList(server("Other", "10.0.0.7"))));
     }
 
     @Test
     public void aTypedAddressWithNoKnownServiceDoesntFollowAnything() {
-        assertNull(ServerPicker.followSaved(null,
+        assertNull(ServerPicker.followSaved(null, null,
             address("10.0.0.1:8080"), Collections.singletonList(server("Other", "10.0.0.7"))));
+    }
+
+    @Test
+    public void theIdFollowsAServerWhoseHostnameChanged() {
+        ServerAddress moved = ServerPicker.followSaved("abc", "Network Signage on old-name",
+            address("10.0.0.1:8080"), Collections.singletonList(withId("Network Signage on new-name", "10.0.0.2", "abc")));
+        assertEquals(address("10.0.0.2:8080"), moved);
+    }
+
+    @Test
+    public void theIdFollowsASuffixedName() {
+        ServerAddress moved = ServerPicker.followSaved("abc", "Office",
+            address("10.0.0.1:8080"), Arrays.asList(withId("Office", "10.0.0.7", "someone-else"), withId("Office (2)", "10.0.0.2", "abc")));
+        assertEquals(address("10.0.0.2:8080"), moved);
+    }
+
+    @Test
+    public void theIdWinsOverTheName() {
+        DiscoveredServer match = ServerPicker.findSaved("abc", "Office",
+            Arrays.asList(server("Office", "10.0.0.7"), withId("Renamed", "10.0.0.2", "abc")));
+        assertEquals("Renamed", match.name);
+    }
+
+    @Test
+    public void theSameNameWithADifferentIdIsADifferentServer() {
+        assertNull(ServerPicker.followSaved("abc", "Office",
+            address("10.0.0.1:8080"), Collections.singletonList(withId("Office", "10.0.0.2", "someone-else"))));
+    }
+
+    @Test
+    public void fallsBackToTheNameForAServerWithNoId() {
+        assertEquals(address("10.0.0.2:8080"), ServerPicker.followSaved("abc", "Office",
+            address("10.0.0.1:8080"), Collections.singletonList(server("Office", "10.0.0.2"))));
+    }
+
+    @Test
+    public void aChoiceSavedBeforeIdsExistedStillFollowsItsName() {
+        DiscoveredServer match = ServerPicker.findSaved(null, "Office", Collections.singletonList(withId("Office", "10.0.0.2", "abc")));
+        assertEquals("abc", match.id);
+    }
+
+    @Test
+    public void anIdIsNoMatchForNoSavedChoice() {
+        assertNull(ServerPicker.findSaved(null, null, Collections.singletonList(withId("Office", "10.0.0.2", "abc"))));
     }
 
     @Test
     public void matchesATypedAddressToItsService() {
         List<DiscoveredServer> found = Arrays.asList(server("Office", "10.0.0.1"), server("Lobby", "10.0.0.2"));
-        assertEquals("Lobby", ServerPicker.nameAt(address("10.0.0.2:8080"), found));
-        assertNull(ServerPicker.nameAt(address("10.0.0.3:8080"), found));
-        assertNull(ServerPicker.nameAt(address("10.0.0.2:9000"), found));
+        assertEquals("Lobby", ServerPicker.atAddress(address("10.0.0.2:8080"), found).name);
+        assertNull(ServerPicker.atAddress(address("10.0.0.3:8080"), found));
+        assertNull(ServerPicker.atAddress(address("10.0.0.2:9000"), found));
     }
 
     @Test

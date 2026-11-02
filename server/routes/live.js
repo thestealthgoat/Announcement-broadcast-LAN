@@ -10,6 +10,22 @@ const MIN_KBPS = 500;
 const MAX_KBPS = 20000;
 const INPUTS = ['rtmp', 'srt', 'device'];
 const FIRST_PORT = { rtmp: 1935, srt: 9000 };
+const CONTROL_CHARS = /[\u0000-\u001f\u007f]/;
+
+// These go straight onto ffmpeg's command line, where a NUL can't even be passed.
+function deviceName(value, field, saved) {
+  if (saved && value === saved) return value; // A row saved before this check can still be renamed or turned off.
+  if (typeof value === 'string' && CONTROL_CHARS.test(value)) throw httpError(400, `That ${field.toLowerCase()} name can't be used. Choose it again from the list.`);
+  return text(value, field, { max: 200 });
+}
+
+async function capabilitiesOf(live) {
+  try {
+    return await live.capabilities();
+  } catch {
+    throw httpError(409, 'Could not check what ffmpeg can do on this computer. Try again in a moment.');
+  }
+}
 
 // RTMP listens on TCP and SRT on UDP, so the check has to match the protocol.
 function portIsFree(port, input) {
@@ -62,8 +78,8 @@ export default async function liveRoutes(app, { db, hub, live, port: serverPort 
 
     if (merged.input === 'device') {
       merged.port = null;
-      merged.device = text(merged.device, 'Capture device', { max: 200 });
-      merged.audio_device = merged.audio_device ? text(merged.audio_device, 'Audio device', { max: 200 }) : null;
+      merged.device = deviceName(merged.device, 'Capture device', current?.device);
+      merged.audio_device = merged.audio_device ? deviceName(merged.audio_device, 'Audio device', current?.audio_device) : null;
       return merged;
     }
     merged.device = null;
@@ -83,7 +99,7 @@ export default async function liveRoutes(app, { db, hub, live, port: serverPort 
 
   async function assertInputAvailable(input) {
     if (input === 'device') return;
-    const caps = await live.capabilities();
+    const caps = await capabilitiesOf(live);
     if (!caps[input]) throw httpError(400, `This computer's copy of ffmpeg cannot receive ${input.toUpperCase()}. Choose a different input type.`);
   }
 
@@ -93,7 +109,7 @@ export default async function liveRoutes(app, { db, hub, live, port: serverPort 
 
   // Only what works on this computer, so the form can hide everything else.
   app.get('/api/live-feeds/options', { preHandler: requireLive }, async () => {
-    const [caps, devices] = await Promise.all([live.capabilities(), live.devices()]);
+    const [caps, devices] = await Promise.all([capabilitiesOf(live), live.devices()]);
     const used = new Set(db.all('SELECT port FROM live_feeds WHERE port IS NOT NULL').map((r) => r.port));
     const suggest = (start) => {
       let p = start;

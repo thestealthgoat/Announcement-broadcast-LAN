@@ -45,6 +45,8 @@ import org.networksignage.kiosk.logic.NavigationPolicy;
 import org.networksignage.kiosk.logic.RetryBackoff;
 import org.networksignage.kiosk.logic.ServerAddress;
 import org.networksignage.kiosk.logic.ServerPicker;
+import org.networksignage.kiosk.logic.ServerProbe;
+import org.networksignage.kiosk.logic.ServerWatch;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -87,6 +89,8 @@ public class KioskActivity extends Activity implements ServerDiscovery.Listener 
     private List<DiscoveredServer> listedServers = new ArrayList<>();
     private String setupInitialText = "";
     private AlertDialog menu;
+    private ServerAddress checkingMove;
+    private int checkToken;
 
     private FrameLayout webContainer;
     private WebView webView;
@@ -109,6 +113,10 @@ public class KioskActivity extends Activity implements ServerDiscovery.Listener 
         onLoadFailed("timed out");
     };
     private final Runnable holdElapsed = () -> act(keys.onHoldElapsed());
+    private final Runnable playingCheck = this::checkForMove;
+    private final Runnable stopListening = () -> {
+        if (mode == Mode.PLAYING) discovery.stop();
+    };
 
     // ---------- lifecycle ----------
 
@@ -136,6 +144,8 @@ public class KioskActivity extends Activity implements ServerDiscovery.Listener 
             discovery.start();
         } else if (tryCancelledByStop) {
             loadPlayer();
+        } else if (mode == Mode.PLAYING) {
+            startWatching();
         }
         tryCancelledByStop = false;
     }
@@ -169,12 +179,15 @@ public class KioskActivity extends Activity implements ServerDiscovery.Listener 
         tryCancelledByStop = mode == Mode.CONNECTING || mode == Mode.RETRYING;
         handler.removeCallbacks(retry);
         handler.removeCallbacks(loadTimeout);
+        stopWatching();
+        cancelChecks();
         discovery.stop();
     }
 
     @Override
     protected void onDestroy() {
         handler.removeCallbacksAndMessages(null);
+        cancelChecks();
         discovery.stop();
         if (menu != null) menu.dismiss();
         destroyWebView();
@@ -359,6 +372,7 @@ public class KioskActivity extends Activity implements ServerDiscovery.Listener 
     private void loadPlayer() {
         handler.removeCallbacks(retry);
         handler.removeCallbacks(loadTimeout);
+        stopWatching();
         if (server == null) {
             showSetup();
             return;
@@ -380,6 +394,7 @@ public class KioskActivity extends Activity implements ServerDiscovery.Listener 
         setupScreen.setVisibility(View.GONE);
         webView.setVisibility(View.VISIBLE);
         webView.requestFocus();
+        startWatching();
     }
 
     private void onLoadFailed(String why) {
@@ -391,6 +406,7 @@ public class KioskActivity extends Activity implements ServerDiscovery.Listener 
     private void enterRetrying(long delayMs) {
         handler.removeCallbacks(loadTimeout);
         handler.removeCallbacks(retry);
+        stopWatching();
         mode = Mode.RETRYING;
         showStatus(R.string.retry_title);
         handler.postDelayed(retry, delayMs);
@@ -399,7 +415,7 @@ public class KioskActivity extends Activity implements ServerDiscovery.Listener 
 
     /** Looks for the remembered service, in case the host's address changed. */
     private void rediscover() {
-        if (store.serviceName() == null) return;
+        if (!ServerWatch.hasIdentity(store.serverId(), store.serviceName())) return;
         long now = SystemClock.elapsedRealtime();
         if (!discovery.isRunning()) {
             lastDiscoveryRestart = now;
@@ -408,6 +424,35 @@ public class KioskActivity extends Activity implements ServerDiscovery.Listener 
             lastDiscoveryRestart = now;
             discovery.restart();
         }
+    }
+
+    /**
+     * While playing, nothing fails when the host's address changes: the player just retries the
+     * dead address, and overrides stop arriving. So look every few minutes, briefly.
+     */
+    private void startWatching() {
+        stopWatching();
+        if (mode == Mode.PLAYING && ServerWatch.hasIdentity(store.serverId(), store.serviceName())) {
+            handler.postDelayed(playingCheck, ServerWatch.CHECK_EVERY_MS);
+        }
+    }
+
+    private void stopWatching() {
+        handler.removeCallbacks(playingCheck);
+        handler.removeCallbacks(stopListening);
+    }
+
+    private void checkForMove() {
+        if (mode != Mode.PLAYING) return;
+        lastDiscoveryRestart = SystemClock.elapsedRealtime();
+        discovery.restart();
+        handler.postDelayed(stopListening, ServerWatch.LISTEN_MS);
+        handler.postDelayed(playingCheck, ServerWatch.CHECK_EVERY_MS);
+    }
+
+    private void cancelChecks() {
+        checkToken++;
+        checkingMove = null;
     }
 
     private void recoverFromRendererLoss() {
@@ -435,17 +480,57 @@ public class KioskActivity extends Activity implements ServerDiscovery.Listener 
     public void onServersChanged(List<DiscoveredServer> servers) {
         if (mode == Mode.SETUP) {
             listServers(servers);
-        } else if (mode == Mode.CONNECTING || mode == Mode.RETRYING) {
-            ServerAddress moved = ServerPicker.followSaved(store.serviceName(), server, servers);
-            if (moved != null) {
-                Log.i(TAG, "The server has moved to " + moved);
-                server = moved;
-                store.save(moved, store.serviceName());
-                mode = Mode.RETRYING; // Keeps the same screen, showing the new address.
-                showStatus(R.string.retry_title);
-                loadPlayer();
-            }
+            return;
         }
+        DiscoveredServer saved = ServerPicker.findSaved(store.serverId(), store.serviceName(), servers);
+        if (saved == null) return;
+        if (saved.address().equals(server)) {
+            // Still here, but a hostname may have changed, or this choice is older than IDs.
+            store.save(server, saved.name, saved.id == null ? store.serverId() : saved.id);
+        } else {
+            checkMove(saved);
+        }
+    }
+
+    /** Tries the new address before anything is saved, because NsdManager's one address can be wrong. */
+    private void checkMove(DiscoveredServer target) {
+        ServerAddress to = target.address();
+        if (to.equals(checkingMove)) return;
+        checkingMove = to;
+        int token = ++checkToken;
+        boolean playing = mode == Mode.PLAYING;
+        ServerAddress from = server;
+        new Thread(() -> {
+            boolean newAnswers = ServerProbe.responds(to, ServerWatch.PROBE_TIMEOUT_MS);
+            boolean currentAnswers = playing && newAnswers && ServerProbe.responds(from, ServerWatch.PROBE_TIMEOUT_MS);
+            boolean move = ServerWatch.shouldMove(playing, newAnswers, currentAnswers);
+            handler.post(() -> finishMove(token, target, move));
+        }, "signage-move-check").start();
+    }
+
+    private void finishMove(int token, DiscoveredServer target, boolean move) {
+        if (token != checkToken) return;
+        checkingMove = null;
+        if (!move || mode == Mode.SETUP) return;
+        ServerAddress moved = target.address();
+        Log.i(TAG, "The server has moved to " + moved);
+        carryPairing(server, moved);
+        server = moved;
+        store.save(moved, target.name, target.id == null ? store.serverId() : target.id);
+        if (mode != Mode.PLAYING) {
+            mode = Mode.RETRYING; // Keeps the same screen, showing the new address.
+            showStatus(R.string.retry_title);
+        }
+        loadPlayer();
+    }
+
+    /** See {@link ServerWatch#deviceIdFromCookies}. Without this, the TV would ask to be paired again. */
+    private void carryPairing(ServerAddress from, ServerAddress to) {
+        CookieManager cookies = CookieManager.getInstance();
+        String deviceId = ServerWatch.deviceIdFromCookies(cookies.getCookie(from.origin()));
+        if (deviceId == null) return;
+        cookies.setCookie(to.origin(), ServerWatch.deviceCookie(deviceId));
+        cookies.flush();
     }
 
     @Override
@@ -458,6 +543,8 @@ public class KioskActivity extends Activity implements ServerDiscovery.Listener 
     private void showSetup() {
         handler.removeCallbacks(retry);
         handler.removeCallbacks(loadTimeout);
+        stopWatching();
+        cancelChecks();
         mode = Mode.SETUP;
         webView.stopLoading();
         webView.loadUrl("about:blank"); // Stops the player, including any sound.
@@ -493,7 +580,7 @@ public class KioskActivity extends Activity implements ServerDiscovery.Listener 
                 Math.round(10 * getResources().getDisplayMetrics().density);
             button.setText(item.label());
             button.setTag(item.name);
-            button.setOnClickListener(v -> chooseServer(item.address(), item.name));
+            button.setOnClickListener(v -> chooseDiscovered(item));
             setupServers.addView(button);
             if (toFocus == null || item.name.equals(focusedName)) toFocus = button;
         }
@@ -518,15 +605,39 @@ public class KioskActivity extends Activity implements ServerDiscovery.Listener 
             setupError.setVisibility(View.VISIBLE);
             return;
         }
-        String name = ServerPicker.nameAt(typed, discovery.servers());
-        // Retyping the same address shouldn't forget which service it is.
-        if (name == null && typed.equals(server)) name = store.serviceName();
-        chooseServer(typed, name);
+        DiscoveredServer known = ServerPicker.atAddress(typed, discovery.servers());
+        if (known != null) {
+            chooseServer(typed, known.name, known.id);
+        } else if (typed.equals(server)) {
+            // Retyping the same address shouldn't forget which service it is.
+            chooseServer(typed, store.serviceName(), store.serverId());
+        } else {
+            chooseServer(typed, null, null);
+        }
     }
 
-    private void chooseServer(ServerAddress address, String serviceName) {
+    /** A typed address is taken on trust, but one from NsdManager is tried first. It can be unreachable. */
+    private void chooseDiscovered(DiscoveredServer item) {
+        setupError.setVisibility(View.GONE);
+        ServerAddress to = item.address();
+        int token = ++checkToken;
+        new Thread(() -> {
+            boolean answers = ServerProbe.responds(to, ServerWatch.PROBE_TIMEOUT_MS);
+            handler.post(() -> {
+                if (token != checkToken || mode != Mode.SETUP) return;
+                if (answers) {
+                    chooseServer(to, item.name, item.id);
+                } else {
+                    setupError.setText(R.string.setup_server_unreachable);
+                    setupError.setVisibility(View.VISIBLE);
+                }
+            });
+        }, "signage-choice-check").start();
+    }
+
+    private void chooseServer(ServerAddress address, String serviceName, String serverId) {
         server = address;
-        store.save(address, serviceName);
+        store.save(address, serviceName, serverId);
         leaveSetup();
     }
 

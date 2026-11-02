@@ -9,12 +9,19 @@ public final class DiscoveredServer {
     public final int port;
     /** From the service's TXT record. Null if it wasn't there. */
     public final String version;
+    /** The server's lasting identity, from the TXT record. Null for a server too old to send one. */
+    public final String id;
 
     public DiscoveredServer(String name, String host, int port, String version) {
+        this(name, host, port, version, null);
+    }
+
+    public DiscoveredServer(String name, String host, int port, String version, String id) {
         this.name = unescape(name);
         this.host = host;
         this.port = port;
         this.version = version;
+        this.id = id == null || id.isEmpty() ? null : id;
     }
 
     public ServerAddress address() {
@@ -60,11 +67,11 @@ public final class DiscoveredServer {
         if (!(other instanceof DiscoveredServer)) return false;
         DiscoveredServer o = (DiscoveredServer) other;
         return port == o.port && Objects.equals(name, o.name) && Objects.equals(host, o.host)
-            && Objects.equals(version, o.version);
+            && Objects.equals(version, o.version) && Objects.equals(id, o.id);
     }
 
     @Override
     public int hashCode() {
-        return Objects.hash(name, host, port, version);
+        return Objects.hash(name, host, port, version, id);
     }
 }

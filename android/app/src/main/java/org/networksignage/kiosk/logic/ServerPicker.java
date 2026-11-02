@@ -24,25 +24,38 @@ public final class ServerPicker {
     }
 
     /**
-     * Where a remembered server has moved to, or null to stay put. It only follows the same
-     * service name. It never jumps to some other server just because that one is answering,
-     * because a TV showing the wrong organisation's signs is worse than one saying it's retrying.
+     * The remembered server among those found, or null. The ID comes first, because a hostname can
+     * change and a name taken by another host gets a number added. The name only counts where
+     * there's no ID to compare: a server too old to send one, or a choice saved before IDs existed.
+     * The same name with a different ID is a different server, and a TV showing the wrong
+     * organisation's signs is worse than one saying it's retrying.
      */
-    public static ServerAddress followSaved(String savedName, ServerAddress current, Collection<DiscoveredServer> found) {
-        if (savedName == null) return null;
-        for (DiscoveredServer server : usable(found)) {
-            if (savedName.equalsIgnoreCase(server.name)) {
-                ServerAddress moved = server.address();
-                return moved.equals(current) ? null : moved;
+    public static DiscoveredServer findSaved(String savedId, String savedName, Collection<DiscoveredServer> found) {
+        List<DiscoveredServer> servers = usable(found);
+        if (savedId != null) {
+            for (DiscoveredServer server : servers) {
+                if (savedId.equals(server.id)) return server;
             }
+        }
+        if (savedName == null) return null;
+        for (DiscoveredServer server : servers) {
+            if (savedName.equalsIgnoreCase(server.name) && (savedId == null || server.id == null)) return server;
         }
         return null;
     }
 
-    /** The service name at a typed address, so a typed choice can also follow an address change. */
-    public static String nameAt(ServerAddress address, Collection<DiscoveredServer> found) {
+    /** Where a remembered server has moved to, or null to stay put. */
+    public static ServerAddress followSaved(String savedId, String savedName, ServerAddress current, Collection<DiscoveredServer> found) {
+        DiscoveredServer server = findSaved(savedId, savedName, found);
+        if (server == null) return null;
+        ServerAddress moved = server.address();
+        return moved.equals(current) ? null : moved;
+    }
+
+    /** The service at a typed address, so a typed choice can also follow an address change. */
+    public static DiscoveredServer atAddress(ServerAddress address, Collection<DiscoveredServer> found) {
         for (DiscoveredServer server : found) {
-            if (server.name != null && address.equals(server.address())) return server.name;
+            if (server.name != null && address.equals(server.address())) return server;
         }
         return null;
     }

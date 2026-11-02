@@ -83,6 +83,7 @@
     var queue = [];
     var busy = false;
     var full = false;
+    var unavailable = false; // this browser can't store files at all, which isn't running out of room
 
     function open(cb) {
       if (db) return cb(db);
@@ -107,17 +108,36 @@
       }
     }
 
+    function isQuotaError(err) {
+      return !!err && (err.name === 'QuotaExceededError' || err.name === 'NS_ERROR_DOM_QUOTA_REACHED' || err.code === 22);
+    }
+
     function put(url, blob, cb) {
       open(function (d) {
         if (!d) return cb(false);
+        var settled = false;
+        function fail(err) {
+          if (settled) return;
+          settled = true;
+          if (isQuotaError(err)) full = true;
+          else unavailable = true;
+          cb(false);
+        }
         try {
           var tx = d.transaction('files', 'readwrite');
           tx.objectStore('files').put(blob, url);
-          tx.oncomplete = function () { cb(true); };
-          tx.onerror = tx.onabort = function () { full = true; cb(false); };
+          tx.oncomplete = function () {
+            if (settled) return;
+            settled = true;
+            cb(true);
+          };
+          tx.onerror = function (ev) {
+            var err = (ev && ev.target && ev.target.error) || tx.error;
+            if (err) fail(err); // With none yet, the abort that follows says why.
+          };
+          tx.onabort = function () { fail(tx.error); };
         } catch (e) {
-          full = true;
-          cb(false);
+          fail(e);
         }
       });
     }
@@ -149,7 +169,7 @@
     }
 
     function pump() {
-      if (busy || full || !queue.length) return;
+      if (busy || full || unavailable || !queue.length) return;
       var url = queue.shift();
       busy = true;
       function next() {
@@ -320,13 +340,25 @@
       layer.appendChild(video);
       if (slide.type === 'video') {
         MediaCache.resolve(slide.src, function (url) { if (!prep.disposed) video.src = url; });
-      } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
+      } else if (video.canPlayType('application/vnd.apple.mpegurl') && slide.src.indexOf('/live/') !== 0) {
+        // Native needs no CORS, which a stream on someone else's server may not offer hls.js.
         video.src = slide.src;
       } else {
+        // Our own feeds prefer hls.js wherever it runs: Android WebView and Chrome answer "maybe"
+        // to the check above, and native playback there gets neither the low-latency settings nor
+        // the error recovery. A TV with no MSE, or where hls.js won't load, still has native.
+        var canNative = !!video.canPlayType('application/vnd.apple.mpegurl');
         loadHls(function () {
           if (prep.disposed) return;
-          if (!window.Hls || !window.Hls.isSupported()) return finish(false);
-          var hls = new window.Hls(hlsConfig(slide));
+          var hls = null;
+          try {
+            if (window.Hls && window.Hls.isSupported()) hls = new window.Hls(hlsConfig(slide));
+          } catch (e) {}
+          if (!hls) {
+            if (canNative) video.src = slide.src;
+            else finish(false);
+            return;
+          }
           prep.hls = hls;
           var triedMediaRecovery = false;
           hls.on(window.Hls.Events.ERROR, function (event, data) {
@@ -334,6 +366,13 @@
             if (data.type === window.Hls.ErrorTypes.MEDIA_ERROR && !triedMediaRecovery) {
               triedMediaRecovery = true;
               hls.recoverMediaError();
+              return;
+            }
+            if (!finished && canNative) {
+              // Some TVs claim MSE but can't decode through it. Their native player was fine.
+              prep.hls = null;
+              try { hls.destroy(); } catch (e) {}
+              video.src = slide.src;
               return;
             }
             if (!finished) finish(false);
@@ -529,6 +568,7 @@
   }
 
   function advance() {
+    if (pendingKey !== null) return; // The next slide is on its way, and it re-arms when it arrives or fails.
     var list = activeList();
     if (!list.length) return showIdle();
     var i = nextIndex(list);
@@ -547,6 +587,8 @@
   }
 
   function show(slide) {
+    clearTimeout(endTimer);
+    deadline = null;
     var token = ++showToken;
     var ready = prepared;
     prepared = null;
@@ -609,7 +651,7 @@
   }
 
   function prepareNext() {
-    if (prepared || !current) return;
+    if (prepared || !current || pendingKey !== null) return;
     var list = activeList();
     if (list.length < 2) return;
     var slide = list[nextIndex(list)];

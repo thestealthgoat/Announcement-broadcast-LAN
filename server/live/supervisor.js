@@ -5,6 +5,7 @@ import path from 'node:path';
 import { lanAddresses } from '../lan.js';
 import { ENCODERS, PLAYLIST, classifyFailure, feedArgs, isSenderDisconnect, playlistSegments, senderAddress } from './ffmpeg-args.js';
 import { listDevices, probeCapabilities } from './probe.js';
+import { createPidFiles } from './orphans.js';
 
 const POLL_MS = 500;
 const FRESH_MS = 4000;      // a playlist older than this means no new video is arriving
@@ -18,24 +19,47 @@ const SETTLED_MS = 3000;
 const KILL_AFTER_MS = 3000;
 const TAIL_CHARS = 4000;
 
+// What an admin sees when a feed couldn't even be started.
+function startProblem(err) {
+  if (err?.code === 'ERR_INVALID_ARG_VALUE') return 'The saved capture device name cannot be used. Edit this feed and choose the device again.';
+  if (err?.code === 'ENOSPC') return 'The host computer is out of disk space.';
+  if (['EPERM', 'EACCES', 'EBUSY', 'ENOTEMPTY', 'EROFS'].includes(err?.code)) return "Could not prepare this feed's folder on the host computer. Trying again.";
+  return 'This feed could not start. Trying again.';
+}
+
 export function createLiveFeeds({ db, hub, dataDir, ffmpeg, log, platform = process.platform }) {
   const liveDir = path.join(dataDir, 'live');
   fs.mkdirSync(liveDir, { recursive: true });
+  const pidFiles = createPidFiles(path.join(dataDir, 'live-pids'), { log });
   const entries = new Map();
   const aborter = new AbortController();
   let stopped = false;
   let poller = null;
   let capsPromise = null;
+  let reaped = Promise.resolve();
 
   const feedDir = (id) => path.join(liveDir, id);
   const loadRow = (id) => db.get('SELECT * FROM live_feeds WHERE media_id = ?', id);
 
   function capabilities() {
-    capsPromise ??= probeCapabilities(ffmpeg, { signal: aborter.signal }).catch((err) => {
+    // Only a usable answer is kept, so the next caller asks again after any other result.
+    capsPromise ??= probeCapabilities(ffmpeg, { signal: aborter.signal }).then((caps) => {
+      if (!caps.encoders.length) capsPromise = null;
+      return caps;
+    }, (err) => {
       capsPromise = null;
       throw err;
     });
     return capsPromise;
+  }
+
+  // Cleanup that may fail (Windows keeps files busy) without it mattering right now.
+  function clearFeedDir(id) {
+    try {
+      fs.rmSync(feedDir(id), { recursive: true, force: true });
+    } catch (err) {
+      log?.warn?.({ err, feed: id }, 'Could not remove old live video');
+    }
   }
 
   function setStatus(entry, status, message = null) {
@@ -44,9 +68,13 @@ export function createLiveFeeds({ db, hub, dataDir, ffmpeg, log, platform = proc
     entry.status = status;
     entry.message = message;
     if (stopped || entry.removed) return;
-    if (availabilityChanged) hub.pushMedia(entry.id);
-    hub.adminRefresh('live');
-    hub.adminRefresh('media');
+    try {
+      if (availabilityChanged) hub.pushMedia(entry.id);
+      hub.adminRefresh('live');
+      hub.adminRefresh('media');
+    } catch (err) {
+      log?.error?.(err); // Runs from timers and process events, where a throw would end the server.
+    }
   }
 
   function chooseEncoder(entry, caps) {
@@ -61,38 +89,63 @@ export function createLiveFeeds({ db, hub, dataDir, ffmpeg, log, platform = proc
     entry.timer.unref?.();
   }
 
+  function nextDelay(entry) {
+    entry.failures += 1;
+    return Math.min(BACKOFF_MS * 2 ** (entry.failures - 1), MAX_BACKOFF_MS);
+  }
+
+  function retryLater(entry, message) {
+    schedule(entry, nextDelay(entry));
+    setStatus(entry, 'error', message);
+  }
+
+  // Callers don't wait on this, so it must never reject: that would end the whole server.
   async function launch(entry) {
+    try {
+      await startFeed(entry);
+    } catch (err) {
+      if (stopped || entry.removed) return;
+      log?.error?.({ err, feed: entry.id }, 'A live feed could not start');
+      if (!entry.child) retryLater(entry, startProblem(err));
+    }
+  }
+
+  async function startFeed(entry) {
     if (stopped || entry.removed || entry.child || !entry.row.enabled) return;
     const generation = ++entry.generation;
+    await reaped;
     let caps;
     try {
       caps = await capabilities();
     } catch {
-      if (!stopped) setStatus(entry, 'error', 'Could not start ffmpeg on this computer.');
+      if (!stopped && generation === entry.generation) retryLater(entry, 'Could not check what ffmpeg can do on this computer. Trying again.');
       return;
     }
     if (stopped || entry.removed || entry.child || generation !== entry.generation) return;
     if (entry.row.input !== 'device' && !caps[entry.row.input]) {
-      setStatus(entry, 'error', `This computer's copy of ffmpeg cannot receive ${entry.row.input.toUpperCase()}. Choose a different input type.`);
+      retryLater(entry, `This computer's copy of ffmpeg cannot receive ${entry.row.input.toUpperCase()}. Choose a different input type.`);
       return;
     }
     const encoder = chooseEncoder(entry, caps);
     if (!encoder) {
-      setStatus(entry, 'error', 'None of the video encoders work on this computer.');
+      retryLater(entry, 'None of the video encoders work on this computer.');
       return;
     }
+    entry.caps = caps;
     entry.encoder = encoder;
 
     const dir = feedDir(entry.id);
     fs.rmSync(dir, { recursive: true, force: true }); // never serve the last session's video
     fs.mkdirSync(dir, { recursive: true });
 
-    const child = spawn(ffmpeg, feedArgs(entry.row, encoder, platform), {
+    const args = feedArgs(entry.row, encoder, platform);
+    const child = spawn(ffmpeg, args, {
       cwd: dir,
       stdio: ['ignore', 'ignore', 'pipe'],
       windowsHide: true,
     });
     entry.child = child;
+    if (child.pid) pidFiles.write(entry.id, child.pid, ffmpeg, args[args.indexOf('-i') + 1]);
     entry.tail = '';
     entry.sawInput = false;
     entry.sawSegments = false;
@@ -112,7 +165,10 @@ export function createLiveFeeds({ db, hub, dataDir, ffmpeg, log, platform = proc
       entry.tail += `\n${err.message}`;
     });
     child.on('close', (code) => {
-      if (entry.child === child) entry.child = null;
+      if (entry.child === child) {
+        entry.child = null;
+        pidFiles.remove(entry.id);
+      }
       if (stopped || entry.removed || entry.stopping) return;
       onExit(entry, code);
     });
@@ -132,12 +188,16 @@ export function createLiveFeeds({ db, hub, dataDir, ffmpeg, log, platform = proc
     if (failure?.kind === 'encoder') {
       // For example NVENC running out of sessions: carry on with the software encoder.
       entry.softwareOnly = true;
-      setStatus(entry, 'idle');
-      schedule(entry, RELISTEN_MS);
+      if (chooseEncoder(entry, entry.caps) !== encoder) {
+        setStatus(entry, 'idle');
+        schedule(entry, RELISTEN_MS);
+        return;
+      }
+      // No other encoder to move to, so going straight back would only repeat the failure.
+      retryLater(entry, failure.message);
       return;
     }
-    entry.failures += 1;
-    const delay = Math.min(BACKOFF_MS * 2 ** (entry.failures - 1), MAX_BACKOFF_MS);
+    const delay = nextDelay(entry);
     const isDevice = row.input === 'device';
     if (failure?.fatal || isDevice || entry.failures >= QUIET_FAILURES) {
       setStatus(entry, 'error', failure?.message ?? (isDevice ? 'The capture device stopped or could not be opened.' : 'The feed keeps stopping. Trying again.'));
@@ -223,8 +283,13 @@ export function createLiveFeeds({ db, hub, dataDir, ffmpeg, log, platform = proc
 
     // Never waits for probing, which carries on in the background.
     start() {
-      for (const name of fs.readdirSync(liveDir)) {
-        if (!entries.has(name)) fs.rmSync(path.join(liveDir, name), { recursive: true, force: true });
+      reaped = pidFiles.reapAll();
+      try {
+        for (const name of fs.readdirSync(liveDir)) {
+          if (!entries.has(name)) fs.rmSync(path.join(liveDir, name), { recursive: true, force: true });
+        }
+      } catch (err) {
+        log?.warn?.({ err }, 'Could not clear old live video');
       }
       process.on('exit', killOnExit);
       poller = setInterval(() => {
@@ -252,7 +317,8 @@ export function createLiveFeeds({ db, hub, dataDir, ffmpeg, log, platform = proc
       aborter.abort();
       process.off('exit', killOnExit);
       await Promise.all([...entries.values()].map(killChild));
-      for (const e of entries.values()) fs.rmSync(feedDir(e.id), { recursive: true, force: true });
+      await reaped;
+      for (const e of entries.values()) clearFeedDir(e.id);
     },
 
     // Call after the row is saved. Restarts ffmpeg with the new settings.
@@ -261,7 +327,7 @@ export function createLiveFeeds({ db, hub, dataDir, ffmpeg, log, platform = proc
       await killChild(entry);
       entry.row = loadRow(mediaId);
       Object.assign(entry, { failures: 0, softwareOnly: false, encoder: null });
-      fs.rmSync(feedDir(mediaId), { recursive: true, force: true });
+      clearFeedDir(mediaId);
       if (entry.row.enabled) {
         setStatus(entry, 'idle');
         launch(entry);
@@ -277,7 +343,7 @@ export function createLiveFeeds({ db, hub, dataDir, ffmpeg, log, platform = proc
       entry.removed = true;
       entry.status = 'off';
       await killChild(entry);
-      fs.rmSync(feedDir(mediaId), { recursive: true, force: true });
+      clearFeedDir(mediaId);
       entries.delete(mediaId);
     },
 

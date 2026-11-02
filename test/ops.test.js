@@ -12,7 +12,7 @@ import { compareVersions, isNewer, parseVersion } from '../server/ops/versions.j
 import { pickLatest, safeReleaseUrl, updateMenuItems, RELEASES_URL } from '../server/ops/updates.js';
 import { screensNeedingAttention, OFFLINE_ALERT_MS } from '../server/ops/health.js';
 import { isLowStorage, createStorageWatcher } from '../server/ops/storage.js';
-import { createDiscovery, realBonjour } from '../server/ops/discovery.js';
+import { createDiscovery, realBonjour, hostName, uniqueName } from '../server/ops/discovery.js';
 
 const GB = 1024 ** 3;
 const MINUTE = 60000;
@@ -750,7 +750,9 @@ test('discovery publishes the service and version, and close unpublishes', async
   const [, config] = log.find(([what]) => what === 'publish');
   assert.equal(config.type, 'network-signage');
   assert.equal(config.port, port);
-  assert.deepEqual(config.txt, { version: '1.0.2' });
+  assert.deepEqual(config.txt, { version: '1.0.2', id: server.db.getSetting('ops.serverId', null) });
+  assert.match(config.txt.id, /^[0-9a-f-]{36}$/);
+  assert.match(config.host, /^[^.]+\.local$/);
   assert.deepEqual(log.map(([what]) => what), ['publish']);
 
   await server.ops.tick();
@@ -771,6 +773,153 @@ test('discovery publishes again when the address changes, not when the network d
   assert.deepEqual(log.map(([what]) => what), ['publish', 'unpublishAll', 'destroy', 'publish']);
 });
 
+test('discovery publishes again when the network comes back on the same address', async (t) => {
+  const log = [];
+  const { world, server } = await opsServer(t, { discovery: true, createBonjour: async () => fakeBonjour(log) });
+  world.addresses = [];
+  await server.ops.tick();
+  world.addresses = ['192.168.1.20'];
+  await server.ops.tick();
+  assert.deepEqual(log.map(([what]) => what), ['publish', 'unpublishAll', 'destroy', 'publish']);
+  await server.ops.tick();
+  assert.equal(log.filter(([what]) => what === 'publish').length, 2, 'and only once');
+});
+
+test('discovery publishes again after the computer wakes, even on the same address', async (t) => {
+  const log = [];
+  const { world, server } = await opsServer(t, { discovery: true, createBonjour: async () => fakeBonjour(log) });
+  await server.ops.tick();
+  world.clock += MINUTE;
+  await server.ops.tick();
+  assert.equal(log.filter(([what]) => what === 'publish').length, 1, 'a normal gap changes nothing');
+  world.clock += 5 * MINUTE;
+  await server.ops.tick();
+  assert.equal(log.filter(([what]) => what === 'publish').length, 2);
+  world.clock += MINUTE;
+  await server.ops.tick();
+  assert.equal(log.filter(([what]) => what === 'publish').length, 2);
+});
+
+test('discovery retries after an error on a later tick, backing off instead of storming', async () => {
+  let clock = 1000000;
+  let attempts = 0;
+  let healthy = false;
+  const warnings = [];
+  const discovery = createDiscovery({
+    port: () => 9,
+    version: '1.0.2',
+    now: () => clock,
+    log: { warn: ({ err }) => warnings.push(err.message) },
+    createBonjour: async () => {
+      attempts++;
+      if (!healthy) throw new Error('no network yet');
+      return fakeBonjour();
+    },
+  });
+  const tick = (ms) => {
+    clock += ms;
+    return discovery.sync('192.168.1.20');
+  };
+  await tick(0);
+  assert.equal(attempts, 1);
+  await tick(0);
+  await tick(30000);
+  assert.equal(attempts, 1, 'not on the very next tick');
+  await tick(30000);
+  assert.equal(attempts, 2, 'after a minute');
+  await tick(60000);
+  assert.equal(attempts, 2, 'the wait doubles');
+  await tick(60000);
+  assert.equal(attempts, 3);
+  for (let i = 0; i < 200; i++) await tick(30000);
+  assert.ok(attempts <= 3 + 7 + 3, `${attempts} tries in 100 minutes`);
+  assert.equal(warnings.length, attempts);
+
+  healthy = true;
+  await tick(20 * MINUTE);
+  const settled = attempts;
+  await tick(20 * MINUTE);
+  assert.equal(attempts, settled, 'once it works, it stays put');
+  await discovery.stop();
+});
+
+test('an error from the library itself is retried too, once per failure', async () => {
+  let clock = 1000000;
+  const handlers = [];
+  const log = [];
+  const discovery = createDiscovery({
+    port: () => 9,
+    version: '1.0.2',
+    now: () => clock,
+    log: { warn() {} },
+    createBonjour: async (onFatal) => {
+      handlers.push(onFatal);
+      return fakeBonjour(log);
+    },
+  });
+  await discovery.sync('192.168.1.20');
+  handlers[0](new Error('bind failed'));
+  handlers[0](new Error('bind failed again'));
+  await discovery.sync('192.168.1.20');
+  assert.deepEqual(log.map(([what]) => what), ['publish', 'unpublishAll', 'destroy'], 'the down state sticks for now');
+  clock += 60000;
+  await discovery.sync('192.168.1.20');
+  assert.deepEqual(log.map(([what]) => what), ['publish', 'unpublishAll', 'destroy', 'publish']);
+  clock += 60000;
+  handlers[0](new Error('from the instance already replaced'));
+  await discovery.sync('192.168.1.20');
+  assert.equal(log.filter(([what]) => what === 'publish').length, 2, 'a stale error changes nothing');
+  await discovery.stop();
+});
+
+test('the SRV target always ends in .local, whatever the hostname looks like', () => {
+  assert.equal(hostName('DESKTOP-AB12'), 'DESKTOP-AB12.local');
+  assert.equal(hostName('Owens-Mac.local'), 'Owens-Mac.local');
+  assert.equal(hostName('server.school.example'), 'server.local');
+  assert.equal(hostName('My Host_1'), 'My-Host-1.local');
+  assert.equal(hostName(''), 'network-signage.local');
+  assert.equal(hostName('---'), 'network-signage.local');
+  assert.equal(hostName('x'.repeat(100)).length, 63 + '.local'.length);
+});
+
+test('the server ID is made once, and stays through a restart and a copy of the database', async (t) => {
+  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'signage-test-'));
+  const restored = fs.mkdtempSync(path.join(os.tmpdir(), 'signage-test-'));
+  t.after(() => {
+    fs.rmSync(dataDir, { recursive: true, force: true });
+    fs.rmSync(restored, { recursive: true, force: true });
+  });
+  const published = [];
+  const createBonjour = async () => ({
+    ...fakeBonjour(),
+    publish(config) {
+      published.push(config.txt.id);
+      return { on() {} };
+    },
+  });
+  const boot = async (dir) => {
+    const server = await createServer({
+      dataDir: dir, port: 0, host: '127.0.0.1',
+      ops: { fetch: null, discovery: true, createBonjour, addresses: () => ['192.168.1.20'], statfs: statfsOf(200 * GB), tickMs: 3600000 },
+    });
+    await server.start();
+    await server.ops.tick();
+    await server.stop();
+  };
+  await boot(dataDir);
+  await boot(dataDir);
+  fs.copyFileSync(path.join(dataDir, 'signage.db'), path.join(restored, 'signage.db'));
+  await boot(restored);
+  assert.equal(published.length, 3);
+  assert.equal(new Set(published).size, 1);
+  assert.match(published[0], /^[0-9a-f-]{36}$/);
+
+  const other = fs.mkdtempSync(path.join(os.tmpdir(), 'signage-test-'));
+  t.after(() => fs.rmSync(other, { recursive: true, force: true }));
+  await boot(other);
+  assert.notEqual(published[3], published[0], 'a separate install gets its own');
+});
+
 test('discovery failing cannot stop the server', async (t) => {
   const failures = {
     'cannot load or start': async () => { throw new Error('no bonjour'); },
@@ -782,7 +931,7 @@ test('discovery failing cannot stop the server', async (t) => {
     }),
     'teardown never finishes': async () => ({ publish: () => ({ on() {} }), unpublishAll() {}, destroy(done) { done(); } }),
     'fails later on its own': async (onError) => {
-      setTimeout(() => onError(new Error('name conflict')), 5);
+      setTimeout(() => onError(new Error('late failure')), 5);
       return fakeBonjour();
     },
   };
@@ -852,6 +1001,9 @@ test('the real mDNS library publishes, can be browsed, and says goodbye', async 
     port: () => 18473,
     version: '1.2.3',
     name: 'Loopback Test',
+    id: 'test-id',
+    host: 'signage-host.local',
+    addresses: () => ['192.168.50.9'],
     log: { warn: ({ err }) => errors.push(err) },
     createBonjour: async (onFatal, onTransient) => {
       instance = await realBonjour(onFatal, onTransient, { ip: '127.0.0.1', port: mdnsPort, bind: '127.0.0.1', multicast: false });
@@ -874,11 +1026,84 @@ test('the real mDNS library publishes, can be browsed, and says goodbye', async 
   });
   assert.equal(found.name, 'Loopback Test');
   assert.equal(found.port, 18473);
-  assert.deepEqual(found.txt, { version: '1.2.3' });
+  assert.deepEqual(found.txt, { version: '1.2.3', id: 'test-id' });
   assert.equal(found.fqdn, 'Loopback Test._network-signage._tcp.local');
+  assert.equal(found.host, 'signage-host.local');
+  assert.deepEqual(found.addresses, ['192.168.50.9'], 'only addresses the app itself would use');
+  const records = sent.flat().filter((r) => r.type === 'A' || r.type === 'AAAA');
+  assert.ok(records.length > 0);
+  for (const r of records) assert.deepEqual([r.type, r.name, r.data], ['A', 'signage-host.local', '192.168.50.9']);
 
   await discovery.stop();
   const goodbye = sent.flat().find((r) => r.type === 'PTR' && r.ttl === 0 && r.name === '_network-signage._tcp.local');
   assert.ok(goodbye, 'closing announces that the service is gone');
   assert.deepEqual(errors, []);
+});
+
+// Two real library instances that hear each other by unicast on loopback, as two hosts would.
+async function twoHosts(t) {
+  const socket = () => new Promise((resolve) => {
+    const s = dgram.createSocket('udp4');
+    s.bind(0, '127.0.0.1', () => resolve(s));
+  });
+  const [a, b] = [await socket(), await socket()];
+  const host = (mine, theirs, name, id, addresses) => {
+    const sent = [];
+    let instance;
+    const discovery = createDiscovery({
+      port: () => 18473, version: '1.2.3', name, id, host: `${id}.local`, addresses: () => addresses,
+      log: { warn() {} },
+      createBonjour: async (onFatal, onTransient) => {
+        instance = await realBonjour(onFatal, onTransient, { socket: mine, ip: '127.0.0.1', port: theirs.address().port, bind: false, multicast: false });
+        const { mdns } = instance.server;
+        const respond = mdns.respond;
+        mdns.respond = (records, ...rest) => {
+          sent.push(...(records.answers ?? records));
+          return respond(records, ...rest);
+        };
+        return instance;
+      },
+    });
+    return { discovery, sent, instance: () => instance };
+  };
+  const first = host(a, b, 'Same Name', 'first', ['192.168.50.1']);
+  const second = host(b, a, 'Same Name', 'second', ['192.168.50.2']);
+  t.after(async () => {
+    await first.discovery.stop();
+    await second.discovery.stop();
+  });
+  return { first, second };
+}
+
+const names = (sent) => sent.filter((r) => r.type === 'PTR' && r.name === '_network-signage._tcp.local' && r.ttl !== 0).map((r) => r.data);
+
+test('a second host with the same name still gets published, under a suffixed name', async (t) => {
+  const { first, second } = await twoHosts(t);
+  await first.discovery.sync('192.168.50.1');
+  await until(() => names(first.sent).length > 0);
+  await second.discovery.sync('192.168.50.2');
+  await until(() => names(second.sent).includes('Same Name (2)._network-signage._tcp.local'));
+  assert.ok(!names(second.sent).includes('Same Name._network-signage._tcp.local'), 'the taken name is never claimed');
+
+  const goodbyes = second.sent.filter((r) => r.ttl === 0);
+  assert.deepEqual(goodbyes, [], 'and giving it up does not tell TVs the first host has gone');
+
+  const found = await new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error('the second host was not found')), 5000);
+    first.instance().find({ type: 'network-signage' }, (service) => {
+      if (service.txt.id !== 'second') return;
+      clearTimeout(timer);
+      resolve(service);
+    });
+  });
+  assert.equal(found.name, 'Same Name (2)');
+  assert.deepEqual(found.addresses, ['192.168.50.2']);
+});
+
+test('a suffixed name still fits a DNS label', () => {
+  assert.equal(uniqueName('Short', 1), 'Short');
+  assert.equal(uniqueName('Short', 2), 'Short (2)');
+  const long = uniqueName(`Network Signage on ${'é'.repeat(60)}`, 3);
+  assert.ok(Buffer.byteLength(long) <= 63, long);
+  assert.ok(long.endsWith(' (3)'));
 });

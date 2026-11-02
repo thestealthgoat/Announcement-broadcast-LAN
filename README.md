@@ -51,8 +51,8 @@ Create the feed first. The **Live Feeds** page shows the exact address to use, w
 
 **RTMP**
 
-- **OBS:** go to **Settings > Stream**, choose **Custom** as the service, then paste the **Server** and **Stream key** from the Live Feeds page.
-- **vMix:** go to **Settings > Streaming**, choose **Custom RTMP Server**, then paste the server as the URL and the stream key as the stream name.
+- **OBS:** go to **Settings > Stream**, choose **Custom** as the service, then paste the **Server** from the Live Feeds page, and what it shows for the **Stream key** box.
+- **vMix:** go to **Settings > Streaming**, choose **Custom RTMP Server**, then paste the server as the URL, and what the page shows for the stream key box as the stream name.
 
 **SRT** is offered only if this computer's copy of ffmpeg supports it. If you don't see it as an option, use RTMP. Set the sender to **Caller** mode, with the address shown on the Live Feeds page.
 
@@ -62,7 +62,9 @@ Turn on automatic reconnect in your sender. The feed stops listening for a momen
 
 ### Security
 
-- **Never port-forward a feed's port.** The app's local network filter covers its web pages and video, but not these ports, because ffmpeg listens on them directly. Anyone who can reach the port can send video to your TVs. The stream key is not a password, because ffmpeg accepts any key.
+- **Anyone on the network who can reach a feed's port can send video to this feed.** While nothing else is sending, whatever they send plays on your TVs. OBS and vMix ask for a stream key, but it only fills in that box: it isn't a password, because ffmpeg accepts any key.
+- **Use a separate network if you share this one.** If guests or the public are on your network, put the host computer and the computer sending the video, such as a production trailer, on their own separate network, so nobody else can reach these ports.
+- **Never port-forward a feed's port.** The app's local network filter covers its web pages and video, but not these ports, because ffmpeg listens on them directly.
 - **Anyone on your network can watch a channel,** including its live feeds, since TV addresses don't require signing in.
 
 ### Network load
@@ -100,7 +102,7 @@ Some rules always apply:
 - **Forgotten passwords:** anyone who can manage people can reset a password under **Users**, for accounts that don't have more access than they do. If an admin is locked out, go to the signage computer and choose **Reset admin password** from the tray menu. It shows a temporary password to sign in with, which you then change under **Settings**. Without the tray app, run `npm run reset-admin -- <username>`. Both work for any account with full access, whatever its role is called. They only work on the host computer, so keep it somewhere trusted.
 - **Backups:** everything is in the data folder (tray menu > **Open data folder**). Copy it while the app is stopped.
 - **Internet use:** the server's only outbound request is a once-a-day check of this project's GitHub Releases for a newer version, which then shows a notice with a link. Nothing downloads or installs by itself. Turn it off under **Settings > Check for updates**, and the server contacts nothing outside your network.
-- **Finding the server:** the app announces itself on your local network as an mDNS service, `_network-signage._tcp`, so the kiosk app can find it. If that fails, everything else keeps working.
+- **Finding the server:** the app announces itself on your local network as an mDNS service, `_network-signage._tcp`, so the kiosk app can find it. It includes an ID that stays the same when the computer's name or address changes, and a restored backup keeps it, so TVs can keep following the same server. If another computer on the network already uses the name, this one adds a number to its own. If publishing fails, everything else keeps working, and it tries again later.
 - **Port:** the default is 8080. To change it, put `{ "port": 9000 }` in `config.json` in the data folder and restart.
 
 ### How offline playback works

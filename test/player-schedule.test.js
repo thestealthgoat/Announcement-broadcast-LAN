@@ -16,7 +16,10 @@ function element(tag) {
     set innerHTML(_) { for (const c of [...el.children]) el.removeChild(c); },
     appendChild(c) { c.parentNode = el; el.children.push(c); return c; },
     removeChild(c) { c.parentNode = null; el.children.splice(el.children.indexOf(c), 1); return c; },
-    setAttribute() {}, removeAttribute() {}, addEventListener() {},
+    setAttribute() {}, removeAttribute() {}, listeners: {},
+    addEventListener(type, fn) { (el.listeners[type] ??= []).push(fn); },
+    fire(type) { for (const fn of el.listeners[type] ?? []) fn(); },
+    play() { el.paused = false; }, pause() { el.paused = true; }, load() {},
   };
   return el;
 }
@@ -24,7 +27,9 @@ function element(tag) {
 const text = (el) => [el.textContent, el.src ?? '', ...el.children.map(text)].join('');
 const image = (el) => (el.tagName === 'IMG' ? el : el.children.map(image).find(Boolean));
 
-function boot(storage = new Map()) {
+function boot(storage = new Map(), { native = '', Hls, indexedDB, XMLHttpRequest } = {}) {
+  const head = element('head');
+  const videos = [];
   const els = { stage: element('div'), message: element('div'), hint: element('div') };
   const sockets = [];
   class FakeSocket {
@@ -34,14 +39,25 @@ function boot(storage = new Map()) {
   }
   const env = {
     document: {
-      cookie: '', documentElement: element('html'), getElementById: (id) => els[id], createElement: element,
-      getElementsByTagName: () => [element('head')], addEventListener() {},
+      cookie: '', documentElement: element('html'), getElementById: (id) => els[id],
+      createElement(tag) {
+        const el = element(tag);
+        if (tag === 'video') {
+          el.canPlayType = () => native;
+          videos.push(el);
+        }
+        return el;
+      },
+      getElementsByTagName: () => [head], addEventListener() {},
     },
     location: { pathname: '/play/main', search: '', host: 'tv.test', protocol: 'http:', reload() {}, replace() {} },
     localStorage: { getItem: (k) => storage.get(k) ?? null, setItem: (k, v) => storage.set(k, v) },
     navigator: {}, screen: { height: 1080 }, innerHeight: 1080, isSecureContext: false, WebSocket: FakeSocket,
     Date, setTimeout, clearTimeout, setInterval, clearInterval,
   };
+  if (Hls) env.Hls = Hls;
+  if (indexedDB) env.indexedDB = indexedDB;
+  if (XMLHttpRequest) env.XMLHttpRequest = XMLHttpRequest;
   env.window = env;
   const context = vm.createContext(env);
   for (const s of scripts) s.runInContext(context);
@@ -50,6 +66,10 @@ function boot(storage = new Map()) {
   const visible = () => layers().filter((l) => l.style.visibility === 'visible');
   return {
     storage,
+    env,
+    videos,
+    scripts: () => head.children.filter((c) => c.tagName === 'SCRIPT'),
+    heartbeats: () => socket().sent.filter((m) => m.type === 'hb'),
     receive: (msg) => socket().onmessage({ data: JSON.stringify(msg) }),
     dropNetwork: () => socket().close(),
     // The slide on screen, or null for the idle screen.
@@ -324,4 +344,334 @@ test('a slide whose schedule ended does not linger when everything else fails to
   pass(25);
   assert.equal(tv.showing(), null);
   assert.equal(tv.idle(), true);
+});
+
+// ---------- a slide's old timer ----------
+
+test('a timer left from the old slide does not drop the slide loading next', (t) => {
+  const pass = clock(t);
+  const tv = boot();
+  // A's schedule ends at noon, seen at the check 15 seconds in, three seconds before its own time is up.
+  tv.receive(state('2026-11-02T11:59:50', [slide('A', before('12:00'), 18), picture('B', null, 30), slide('C')]));
+  assert.equal(tv.showing(), 'A');
+  pass(15);
+  assert.deepEqual(tv.loading(), ['B']);
+  const [loading] = tv.loadingLayers();
+  pass(4); // past the moment A's timer was set for
+  assert.deepEqual(tv.loadingLayers(), [loading], 'B is still the one on its way');
+  assert.equal(tv.showing(), 'A', 'and A holds the screen, rather than C jumping in');
+  tv.imageLoaded();
+  assert.equal(tv.showing(), 'B');
+  pass(30);
+  assert.equal(tv.showing(), 'C', 'B got its full time, so its own timer was set');
+});
+
+test('an override pushed near the end of a slide loads only one copy', (t) => {
+  const pass = clock(t);
+  const tv = boot();
+  tv.receive(state('2026-11-02T12:00:00', [slide('A', null, 20), slide('B')]));
+  pass(18);
+  tv.receive(state('2026-11-02T12:00:18', [slide('A', null, 20), slide('B')], { override: { id: 9, slides: [picture('STORM')], remainingMs: null } }));
+  assert.deepEqual(tv.loading(), ['STORM']);
+  const [loading] = tv.loadingLayers();
+  pass(3); // past A's end
+  assert.deepEqual(tv.loadingLayers(), [loading], 'one copy, the same one');
+  tv.imageLoaded();
+  assert.equal(tv.showing(), 'STORM');
+  assert.deepEqual(tv.loading(), []);
+});
+
+test('a video on screen ending does not drop the slide loading next', (t) => {
+  const pass = clock(t);
+  const tv = boot();
+  const video = { ...slide('V', before('12:00'), 40), type: 'video', src: 'http://x/v.mp4' };
+  tv.receive(state('2026-11-02T11:59:50', [video, picture('B', null, 30), slide('C')]));
+  tv.videos[0].fire('canplay');
+  pass(15);
+  assert.deepEqual(tv.loading(), ['B']);
+  tv.videos[0].fire('ended');
+  assert.deepEqual(tv.loading(), ['B']);
+  tv.imageLoaded();
+  assert.equal(tv.showing(), 'B');
+});
+
+test('a state arriving while the next slide loads cannot start the old timer again', (t) => {
+  const pass = clock(t);
+  const tv = boot();
+  const list = [slide('A', null, 3), picture('B', null, 30), slide('C')];
+  tv.receive(state('2026-11-02T12:00:00', list));
+  pass(3);
+  assert.deepEqual(tv.loading(), ['B']);
+  const [loading] = tv.loadingLayers();
+  tv.receive(state('2026-11-02T12:00:03', list));
+  pass(4); // past A's time again, and B's first second-and-a-bit of waiting
+  assert.equal(tv.showing(), 'A');
+  assert.deepEqual(tv.loadingLayers(), [loading], 'still the same load, with no jump to C');
+  tv.imageLoaded();
+  assert.equal(tv.showing(), 'B');
+});
+
+test('nothing further is preloaded while the next slide is still loading', (t) => {
+  const pass = clock(t);
+  const tv = boot();
+  tv.receive(state('2026-11-02T12:00:00', [slide('A', null, 5), picture('B', null, 30), picture('C', null, 30)]));
+  pass(5);
+  assert.deepEqual(tv.loading(), ['B']);
+  pass(3);
+  assert.deepEqual(tv.loading(), ['B'], 'a one-decoder TV has enough to do');
+});
+
+test('a slide that fails to load is skipped, and the one after it gets its full time', (t) => {
+  const pass = clock(t);
+  const tv = boot();
+  tv.receive(state('2026-11-02T11:59:50', [slide('A', before('12:00'), 18), picture('B'), slide('C', null, 20), slide('D')]));
+  pass(15);
+  assert.deepEqual(tv.loading(), ['B']);
+  pass(8); // B's 8 seconds to load run out
+  pass(1); // and the skip takes half a second
+  assert.equal(tv.showing(), 'C');
+  pass(19);
+  assert.equal(tv.showing(), 'C');
+  pass(2);
+  assert.equal(tv.showing(), 'D');
+});
+
+// ---------- HLS ----------
+
+function fakeHls({ supported = true, explodes = false } = {}) {
+  class Hls {
+    static made = [];
+    static isSupported() { return supported; }
+    constructor(config) {
+      if (explodes) throw new Error('no');
+      this.config = config;
+      Hls.made.push(this);
+    }
+    on(event, fn) { this.onError = fn; }
+    loadSource(src) { this.src = src; }
+    attachMedia(video) { this.media = video; }
+    recoverMediaError() { this.recovered = (this.recovered ?? 0) + 1; }
+    destroy() { this.destroyed = true; }
+  }
+  Hls.Events = { ERROR: 'hlsError' };
+  Hls.ErrorTypes = { MEDIA_ERROR: 'mediaError', NETWORK_ERROR: 'networkError' };
+  return Hls;
+}
+
+const liveFeed = (name = 'Program') => ({ ...slide(name, null, 60), type: 'hls', src: '/live/feed/index.m3u8' });
+const outsideStream = (name = 'Outside') => ({ ...slide(name, null, 60), type: 'hls', src: 'http://10.0.0.5/stream.m3u8' });
+
+test('a live feed uses hls.js even when the browser says it can maybe play HLS itself', (t) => {
+  clock(t);
+  const Hls = fakeHls();
+  const tv = boot(new Map(), { native: 'maybe', Hls });
+  tv.receive(state('2026-11-02T12:00:00', [liveFeed()]));
+  assert.equal(Hls.made.length, 1);
+  assert.equal(Hls.made[0].src, '/live/feed/index.m3u8');
+  assert.equal(Hls.made[0].config.liveMaxLatencyDurationCount, 5, 'the low-latency settings');
+  assert.equal(tv.videos[0].src, undefined, 'and not the native player too');
+});
+
+test('hls.js only loads when a slide needs it', (t) => {
+  clock(t);
+  const tv = boot(new Map(), { native: 'maybe' });
+  tv.receive(state('2026-11-02T12:00:00', [slide('A')]));
+  assert.deepEqual(tv.scripts(), []);
+  tv.receive(state('2026-11-02T12:00:00', [liveFeed()]));
+  assert.equal(tv.scripts().length, 1);
+  assert.equal(tv.videos[0].src, undefined, 'nothing plays until it is known whether it loaded');
+  tv.env.Hls = fakeHls();
+  tv.scripts()[0].onload();
+  assert.equal(tv.env.Hls.made.length, 1);
+});
+
+test('when hls.js cannot load, a live feed falls back to the native player', (t) => {
+  clock(t);
+  const tv = boot(new Map(), { native: 'maybe' });
+  tv.receive(state('2026-11-02T12:00:00', [liveFeed()]));
+  tv.scripts()[0].onerror();
+  assert.equal(tv.videos[0].src, '/live/feed/index.m3u8');
+  tv.videos[0].fire('canplay');
+  assert.ok(tv.layer(), 'it reaches the screen');
+});
+
+test('a TV without MSE plays a live feed through the native player', (t) => {
+  clock(t);
+  const tv = boot(new Map(), { native: 'maybe', Hls: fakeHls({ supported: false }) });
+  tv.receive(state('2026-11-02T12:00:00', [liveFeed()]));
+  assert.equal(tv.videos[0].src, '/live/feed/index.m3u8');
+  assert.equal(tv.env.Hls.made.length, 0);
+});
+
+test('hls.js blowing up on an odd browser falls back to the native player', (t) => {
+  clock(t);
+  const tv = boot(new Map(), { native: 'probably', Hls: fakeHls({ explodes: true }) });
+  tv.receive(state('2026-11-02T12:00:00', [liveFeed()]));
+  assert.equal(tv.videos[0].src, '/live/feed/index.m3u8');
+});
+
+test('a fatal media error gets recovery first, then the native player if it happens before the feed shows', (t) => {
+  clock(t);
+  const Hls = fakeHls();
+  const tv = boot(new Map(), { native: 'maybe', Hls });
+  tv.receive(state('2026-11-02T12:00:00', [liveFeed()]));
+  const [hls] = Hls.made;
+  hls.onError('hlsError', { fatal: true, type: 'mediaError' });
+  assert.equal(hls.recovered, 1);
+  assert.equal(tv.videos[0].src, undefined);
+  hls.onError('hlsError', { fatal: true, type: 'mediaError' });
+  assert.equal(hls.destroyed, true);
+  assert.equal(tv.videos[0].src, '/live/feed/index.m3u8');
+});
+
+test('with no native player, hls.js failing is a failed slide, and the channel moves on', (t) => {
+  const pass = clock(t);
+  const Hls = fakeHls();
+  const tv = boot(new Map(), { Hls });
+  tv.receive(state('2026-11-02T12:00:00', [liveFeed(), slide('B')]));
+  Hls.made[0].onError('hlsError', { fatal: true, type: 'networkError' });
+  pass(1);
+  assert.equal(tv.showing(), 'B');
+});
+
+test('a TV with neither shows the channel moving on, not a stuck feed', (t) => {
+  const pass = clock(t);
+  const tv = boot(new Map(), { Hls: fakeHls({ supported: false }) });
+  tv.receive(state('2026-11-02T12:00:00', [liveFeed(), slide('B')]));
+  pass(1);
+  assert.equal(tv.showing(), 'B');
+});
+
+test('an outside stream stays on the native player, which needs no CORS from a server we do not run', (t) => {
+  clock(t);
+  const Hls = fakeHls();
+  const tv = boot(new Map(), { native: 'maybe', Hls });
+  tv.receive(state('2026-11-02T12:00:00', [outsideStream()]));
+  assert.equal(Hls.made.length, 0);
+  assert.equal(tv.videos[0].src, 'http://10.0.0.5/stream.m3u8');
+  assert.deepEqual(tv.scripts(), []);
+
+  const noNative = boot(new Map(), { Hls: fakeHls() });
+  noNative.receive(state('2026-11-02T12:00:00', [outsideStream()]));
+  assert.equal(noNative.env.Hls.made.length, 1, 'and uses hls.js where there is no native player');
+});
+
+// ---------- media cache ----------
+
+function fakeStorage(putFails) {
+  const pending = [];
+  const puts = [];
+  const named = (name) => Object.assign(new Error(name), { name });
+  const db = {
+    transaction() {
+      const tx = {
+        error: null,
+        objectStore: () => ({
+          put(blob, url) {
+            puts.push(url);
+            if (putFails === 'clone') throw named('DataCloneError');
+            if (putFails === 'quota-thrown') throw named('QuotaExceededError');
+            pending.push(() => {
+              if (putFails === 'quota' || putFails === 'other') {
+                // As a browser does: an error event from the request with no error on the transaction yet, then the abort.
+                tx.onerror?.({ target: { error: null } });
+                tx.error = named(putFails === 'quota' ? 'QuotaExceededError' : 'UnknownError');
+                tx.onabort?.();
+              } else if (putFails === 'request') {
+                tx.onerror?.({ target: { error: named('ConstraintError') } });
+                tx.error = named('ConstraintError');
+                tx.onabort?.();
+              } else {
+                tx.oncomplete?.();
+              }
+            });
+            return {};
+          },
+          get() {
+            const req = { result: undefined };
+            pending.push(() => req.onsuccess?.());
+            return req;
+          },
+          openCursor() {
+            const req = { result: null };
+            pending.push(() => {
+              req.onsuccess?.();
+              tx.oncomplete?.();
+            });
+            return req;
+          },
+        }),
+      };
+      return tx;
+    },
+  };
+  class XMLHttpRequest {
+    open() {}
+    send() {
+      this.status = 200;
+      this.response = { blob: true };
+      pending.push(() => this.onload());
+    }
+  }
+  return {
+    puts,
+    XMLHttpRequest,
+    indexedDB: {
+      open() {
+        const req = { result: db };
+        pending.push(() => req.onsuccess?.());
+        return req;
+      },
+    },
+    drain() {
+      while (pending.length) pending.shift()();
+    },
+  };
+}
+
+const cachedSlides = () => [{ ...slide('A', null, 0), src: '/media/a.jpg' }, { ...slide('B', null, 0), src: '/media/b.jpg' }];
+
+function cacheRun(t, putFails) {
+  const pass = clock(t);
+  const storage = fakeStorage(putFails);
+  const tv = boot(new Map(), { indexedDB: storage.indexedDB, XMLHttpRequest: storage.XMLHttpRequest });
+  tv.receive(state('2026-11-02T12:00:00', cachedSlides()));
+  storage.drain();
+  pass(10);
+  return { tv, storage, pass, lastHeartbeat: () => tv.heartbeats().at(-1) };
+}
+
+test('a working cache stores every file and is not full', (t) => {
+  const { storage, lastHeartbeat } = cacheRun(t);
+  assert.deepEqual(storage.puts, ['/media/a.jpg', '/media/b.jpg']);
+  assert.equal(lastHeartbeat().cacheFull, false);
+});
+
+test('a browser that cannot store blobs does not report full storage, and stops trying', (t) => {
+  const { tv, storage, lastHeartbeat, pass } = cacheRun(t, 'clone');
+  assert.deepEqual(storage.puts, ['/media/a.jpg'], 'one try is enough');
+  assert.equal(lastHeartbeat().cacheFull, false);
+  tv.receive(state('2026-11-02T12:00:10', cachedSlides()));
+  storage.drain();
+  pass(10);
+  assert.deepEqual(storage.puts, ['/media/a.jpg'], 'and a new list does not start it again');
+  assert.equal(lastHeartbeat().cacheFull, false);
+});
+
+test('any other storage error is not reported as full either, even after a request error', (t) => {
+  for (const kind of ['other', 'request']) {
+    const { storage, lastHeartbeat } = cacheRun(t, kind);
+    assert.deepEqual(storage.puts, ['/media/a.jpg'], kind);
+    assert.equal(lastHeartbeat().cacheFull, false, kind);
+    t.mock.timers.reset();
+  }
+});
+
+test('really running out of quota is reported as full, however it arrives', (t) => {
+  for (const kind of ['quota', 'quota-thrown']) {
+    const { storage, lastHeartbeat } = cacheRun(t, kind);
+    assert.deepEqual(storage.puts, ['/media/a.jpg'], kind);
+    assert.equal(lastHeartbeat().cacheFull, true, kind);
+    t.mock.timers.reset();
+  }
 });
