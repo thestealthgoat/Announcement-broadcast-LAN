@@ -10,7 +10,8 @@ import { openDb } from './db.js';
 import { createHub } from './hub.js';
 import { createProcessor, resolveFfmpeg } from './media.js';
 import { isLocalAddress, baseUrls } from './lan.js';
-import { userFromToken, httpError, COOKIE } from './auth.js';
+import { userFromToken, httpError, createLoginLimiter, COOKIE } from './auth.js';
+import { listAdmins, resetAdminPassword } from './recovery.js';
 import authRoutes from './routes/auth.js';
 import userRoutes from './routes/users.js';
 import channelRoutes from './routes/channels.js';
@@ -86,7 +87,8 @@ export async function createServer({ dataDir, port = 8080, host = '0.0.0.0', ffm
   });
 
   const portRef = () => app.server.address()?.port ?? port;
-  const ctx = { db, hub, processor, mediaDir, port: portRef };
+  const limiter = createLoginLimiter();
+  const ctx = { db, hub, processor, mediaDir, port: portRef, limiter };
   await app.register(authRoutes, ctx);
   await app.register(userRoutes, ctx);
   await app.register(channelRoutes, ctx);
@@ -142,6 +144,12 @@ export async function createServer({ dataDir, port = 8080, host = '0.0.0.0', ffm
 
   return {
     app, db, hub, processor,
+    listAdmins: () => listAdmins(db),
+    async resetAdminPassword(userId) {
+      const temp = await resetAdminPassword(db, userId);
+      limiter.clear(); // being locked out is usually why someone is here
+      return temp;
+    },
     async start() {
       await app.listen({ port, host });
       processor.resume();

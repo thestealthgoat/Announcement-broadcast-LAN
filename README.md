@@ -41,6 +41,7 @@ YouTube is intentionally not supported.
 - **Requests from outside the local network are refused** by source address. Do not port-forward to this app. It uses plain HTTP, which is not safe over the internet.
 - **Web pages:** some sites refuse to appear inside another page and will show blank.
 - **Sound:** TV browsers block autoplay with sound unless a kiosk browser allows it. A video with sound turned on plays muted rather than freezing. See [TV setup](docs/TV-SETUP.md).
+- **Forgotten passwords:** an admin can reset anyone's password under **Users**. If an admin is locked out, go to the signage computer and choose **Reset admin password** from the tray menu. It shows a temporary password to sign in with, which you then change under **Settings**. Without the tray app, run `npm run reset-admin -- <username>`. This only works on the host computer, so keep it somewhere trusted.
 - **Backups:** everything is in the data folder (tray menu > **Open data folder**). Copy it while the app is stopped.
 - **Port:** the default is 8080. To change it, put `{ "port": 9000 }` in `config.json` in the data folder and restart.
 

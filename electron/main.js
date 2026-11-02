@@ -4,6 +4,7 @@ import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { createServer } from '../server/index.js';
 import { baseUrls } from '../server/lan.js';
+import { runRecoveryFlow } from './recovery.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const DEFAULT_PORT = 8080;
@@ -58,6 +59,15 @@ function showWindow() {
   });
 }
 
+async function recoverAdmin() {
+  app.focus({ steal: true }); // the app has no Dock icon, so dialogs can open behind other windows
+  try {
+    await runRecoveryFlow({ server, dialog, clipboard });
+  } catch (err) {
+    dialog.showErrorBox('Could not reset the password', err.message);
+  }
+}
+
 function autostartAllowed() {
   return app.isPackaged && !process.env.SIGNAGE_NO_AUTOSTART;
 }
@@ -77,6 +87,7 @@ function buildMenu() {
       click: (item) => app.setLoginItemSettings({ openAtLogin: item.checked }),
     });
   }
+  items.push({ label: 'Reset admin password…', click: recoverAdmin });
   items.push({ label: 'Open data folder', click: () => shell.openPath(dataDir()) });
   items.push({ type: 'separator' }, { label: 'Quit Network Signage', click: () => app.quit() });
   tray.setContextMenu(Menu.buildFromTemplate(items));

@@ -1,4 +1,4 @@
-import { hashPassword, verifyPassword, createSession, destroySession, publicUser, requireUser, httpError, createLoginLimiter, COOKIE } from '../auth.js';
+import { hashPassword, verifyPassword, createSession, destroySession, publicUser, requireUser, httpError, COOKIE } from '../auth.js';
 import { VERSION } from '../version.js';
 import { baseUrls } from '../lan.js';
 import QRCode from 'qrcode';
@@ -22,8 +22,7 @@ export function username(value) {
   return v;
 }
 
-export default async function authRoutes(app, { db, port }) {
-  const limiter = createLoginLimiter();
+export default async function authRoutes(app, { db, port, limiter }) {
   const hasUsers = () => !!db.get('SELECT 1 AS x FROM users LIMIT 1');
 
   app.get('/api/setup/status', async () => ({ needsSetup: !hasUsers() }));

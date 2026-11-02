@@ -106,5 +106,6 @@ export function createLoginLimiter({ max = 10, windowMs = 5 * 60 * 1000 } = {}) 
       else h.count += 1;
     },
     reset: (key) => hits.delete(key),
+    clear: () => hits.clear(),
   };
 }

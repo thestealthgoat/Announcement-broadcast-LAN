@@ -57,7 +57,7 @@ export function loginView(root, branding, done) {
       field('Password', password),
       h('button', { type: 'submit', class: 'primary', style: 'width:100%' }, 'Sign in'),
     ),
-    h('p', { class: 'muted small', style: 'margin:.75rem 0 0' }, 'Need an account? Ask your admin.'),
+    h('p', { class: 'muted small', style: 'margin:.75rem 0 0' }, 'Need an account or a new password? Ask your admin. Admins can reset theirs on the signage computer: use the tray menu, then Reset admin password.'),
   )));
   username.focus();
 }

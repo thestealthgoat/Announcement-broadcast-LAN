@@ -8,6 +8,7 @@
   "main": "electron/main.js",
   "scripts": {
     "start": "node server/cli.js",
+    "reset-admin": "node server/reset-admin.js",
     "dev": "node --watch server/cli.js",
     "test": "node --test test/",
     "tray": "electron .",
