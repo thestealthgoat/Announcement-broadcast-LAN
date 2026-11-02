@@ -1,7 +1,7 @@
 {
   "name": "network-signage",
   "productName": "Network Signage",
-  "version": "1.0.2",
+  "version": "2.0.0",
   "description": "Open-source, self-hosted digital signage for your local network.",
   "license": "MIT",
   "type": "module",
@@ -13,7 +13,7 @@
     "test": "node --test test/",
     "tray": "electron .",
     "icons": "node scripts/make-icons.mjs",
-    "dist:mac": "node scripts/prep-ffmpeg.mjs darwin arm64 && node scripts/prep-ffmpeg.mjs darwin x64 && electron-builder --mac pkg --arm64 && electron-builder --mac pkg --x64",
+    "dist:mac": "node scripts/prep-ffmpeg.mjs darwin arm64 && node scripts/prep-ffmpeg.mjs darwin x64 && electron-builder --mac pkg --arm64 && electron-builder --mac pkg --x64 && node scripts/notarize-pkg.mjs dist/Network-Signage-${npm_package_version}-mac-arm64.pkg dist/Network-Signage-${npm_package_version}-mac-x64.pkg",
     "dist:win": "node scripts/prep-ffmpeg.mjs win32 x64 && electron-builder --win nsis --x64"
   },
   "dependencies": {
@@ -67,13 +67,14 @@
       ],
       "category": "public.app-category.utilities",
       "icon": "build/icon.png",
-      "identity": "-",
       "extendInfo": {
         "LSUIElement": true,
         "NSLocalNetworkUsageDescription": "Network Signage uses your local network so TVs and phones can find and reach it.",
         "NSBonjourServices": [
           "_network-signage._tcp"
-        ]
+        ],
+        "NSCameraUsageDescription": "Network Signage uses capture devices for live feeds.",
+        "NSMicrophoneUsageDescription": "Network Signage uses capture devices for live feed audio."
       },
       "extraResources": [
         {
@@ -81,8 +82,11 @@
           "to": "ffmpeg"
         }
       ],
-      "hardenedRuntime": false,
-      "gatekeeperAssess": false
+      "hardenedRuntime": true,
+      "gatekeeperAssess": false,
+      "entitlements": "build/entitlements.mac.plist",
+      "entitlementsInherit": "build/entitlements.mac.plist",
+      "notarize": true
     },
     "win": {
       "target": [
