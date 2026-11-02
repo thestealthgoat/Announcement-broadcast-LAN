@@ -25,6 +25,7 @@ What has been tested on real setups, and what hasn't. Last updated November 2, 2
 | Video with sound on Fire TV Stick | Not tested |
 | Fully Kiosk Browser, and auto-start after a power cut | Not tested |
 | Android kiosk app: not tested on a device | Compiled and unit tested only. It has never run on a device or emulator, so discovery, playback, remote control, recovery, and starting on boot are all unproven |
+| Backup and restore | Automated tests only, on one computer. A real move between two computers, and the tray app's restart after a restore, have not been tried |
 | Windows installer | Not tested yet |
 | Intel Mac installer | Built and inspected, not run |
 | `.pkg` install to Applications from a browser download | Not tested |

@@ -6,6 +6,7 @@ import { createServer } from '../server/index.js';
 import { baseUrls } from '../server/lan.js';
 import { updateMenuItems } from '../server/ops/updates.js';
 import { runRecoveryFlow } from './recovery.js';
+import { restartApp } from './restart.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const DEFAULT_PORT = 8080;
@@ -17,6 +18,7 @@ let tray = null;
 let win = null;
 let server = null;
 let port = DEFAULT_PORT;
+let stopping = false;
 
 const dataDir = () => process.env.SIGNAGE_DATA_DIR ?? app.getPath('userData');
 const adminUrl = () => `${baseUrls(port)[0]}/admin/`;
@@ -126,9 +128,18 @@ async function main() {
   await app.whenReady();
   app.dock?.hide();
   fs.mkdirSync(dataDir(), { recursive: true });
-  port = readPort();
 
-  server = await createServer({ dataDir: dataDir(), port, logger: { level: 'warn' } });
+  // The port is read after any restore goes in, since a restore brings its own config.json.
+  server = await createServer({
+    dataDir: dataDir(),
+    port: () => (port = readPort()),
+    logger: { level: 'warn' },
+    restartsItself: true,
+    onRestart: () => {
+      stopping = true;
+      return restartApp({ app, server });
+    },
+  });
   try {
     await server.start();
   } catch (err) {
@@ -145,7 +156,6 @@ async function main() {
   createTray();
   if (firstRun || !app.isPackaged) showWindow();
 
-  let stopping = false;
   app.on('before-quit', (event) => {
     if (stopping) return;
     stopping = true;

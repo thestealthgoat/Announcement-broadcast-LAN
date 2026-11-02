@@ -10,6 +10,9 @@ export function httpError(statusCode, message) {
   return Object.assign(new Error(message), { statusCode });
 }
 
+// For a 5xx whose message is useful to the person, which the error handler would otherwise hide.
+export const plainError = (statusCode, message) => Object.assign(httpError(statusCode, message), { expose: true });
+
 export async function hashPassword(password) {
   const salt = randomBytes(16);
   const key = await scryptAsync(password, salt, 64);
@@ -81,6 +84,12 @@ export const requireUser = async (req) => {
 export const requirePermission = (...keys) => async (req) => {
   if (!req.user) throw httpError(401, 'Please sign in.');
   if (!keys.some((k) => hasPermission(req.user, k))) throw httpError(403, 'You do not have permission to do that.');
+};
+
+// For what no single permission covers, because it reaches everything.
+export const requireFullAccess = async (req) => {
+  if (!req.user) throw httpError(401, 'Please sign in.');
+  if (!req.user.fullAccess) throw httpError(403, 'You do not have permission to do that.');
 };
 
 export function canAccessChannel(user, channelId) {

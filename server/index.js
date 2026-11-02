@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { randomUUID } from 'node:crypto';
 import Fastify from 'fastify';
 import fastifyStatic from '@fastify/static';
 import multipart from '@fastify/multipart';
@@ -14,6 +15,8 @@ import { isLocalAddress, baseUrls } from './lan.js';
 import { userFromToken, httpError, createLoginLimiter, COOKIE } from './auth.js';
 import { listAdmins, resetAdminPassword } from './recovery.js';
 import { createOps } from './ops/index.js';
+import { applyPendingRestore, finishRestore, undoRestore, LAST_RESTORE_KEY } from './backup/swap.js';
+import { EXPORT_TMP_DIR } from './backup/layout.js';
 import authRoutes from './routes/auth.js';
 import userRoutes from './routes/users.js';
 import roleRoutes from './routes/roles.js';
@@ -24,6 +27,7 @@ import overrideRoutes from './routes/overrides.js';
 import settingsRoutes from './routes/settings.js';
 import opsRoutes from './routes/ops.js';
 import liveRoutes from './routes/live.js';
+import backupRoutes from './routes/backup.js';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const MAX_UPLOAD = 20 * 1024 ** 3;
@@ -50,7 +54,39 @@ const ADMIN_CSP = [
   "form-action 'self'",
 ].join('; ');
 
-export async function createServer({ dataDir, port = 8080, host = '0.0.0.0', ffmpeg = resolveFfmpeg(), logger = false, ops: opsDeps = {} }) {
+// Opens the database, and is what decides whether a restore that just went in place stays there.
+function openAfterRestore(dataDir, restore, log) {
+  const file = path.join(dataDir, 'signage.db');
+  let result = restore.result ?? null;
+  let db = null;
+  if (restore.state === 'applied') {
+    try {
+      db = openDb(file);
+      db.get('SELECT 1 AS x FROM users LIMIT 1');
+      result = finishRestore(dataDir, restore.marker, { log });
+    } catch (err) {
+      try {
+        db?.close();
+      } catch {}
+      db = null;
+      log.error({ err: err.message }, 'A restored database would not open');
+      result = undoRestore(dataDir, restore.marker, err.message);
+    }
+  }
+  db ??= openDb(file);
+  if (result) db.setSetting(LAST_RESTORE_KEY, result);
+  return db;
+}
+
+// `port` can be a function, for when the port comes from a file in the data folder, because a
+// restore can replace that file. `onRestart` runs after a restore is accepted. It should stop the
+// server and start it again, and `restartsItself` says whether it can do that without help.
+export async function createServer({ dataDir, port: portOption = 8080, host = '0.0.0.0', ffmpeg = resolveFfmpeg(), logger = false, ops: opsDeps = {}, onRestart = null, restartsItself = false }) {
+  fs.mkdirSync(dataDir, { recursive: true });
+  // First, because nothing may have the database open while its files change.
+  const restore = applyPendingRestore(dataDir);
+  fs.rmSync(path.join(dataDir, EXPORT_TMP_DIR), { recursive: true, force: true }); // from a crash
+  const port = typeof portOption === 'function' ? portOption() : portOption;
   const mediaDir = path.join(dataDir, 'media');
   fs.mkdirSync(mediaDir, { recursive: true });
 
@@ -60,7 +96,8 @@ export async function createServer({ dataDir, port = 8080, host = '0.0.0.0', ffm
   app.addHook('onRoute', (r) => {
     for (const method of [r.method].flat()) routes.push({ method, url: r.url });
   });
-  const db = openDb(path.join(dataDir, 'signage.db'));
+  const db = openAfterRestore(dataDir, restore, app.log);
+  const backup = { restoring: false, restarting: false };
   const hub = createHub(db, app.log, (mediaId) => live.isAvailable(mediaId));
   const processor = createProcessor({ db, hub, mediaDir, ffmpeg, log: app.log });
   const live = createLiveFeeds({ db, hub, dataDir, ffmpeg, log: app.log });
@@ -86,6 +123,11 @@ export async function createServer({ dataDir, port = 8080, host = '0.0.0.0', ffm
         } catch {}
         if (originHost !== req.headers.host) throw httpError(403, 'Cross-site requests are not allowed.');
       }
+      // Anything saved now would be lost in the swap, so it's better refused.
+      if (backup.restarting) {
+        reply.code(503).send({ error: 'The server is restarting to finish a restore. Try again in a moment.' });
+        return reply;
+      }
     }
     req.user = userFromToken(db, req.cookies?.[COOKIE]);
   });
@@ -94,13 +136,16 @@ export async function createServer({ dataDir, port = 8080, host = '0.0.0.0', ffm
     const status = err.statusCode ?? 500;
     if (err.code === 'FST_REQ_FILE_TOO_LARGE') return reply.code(413).send({ error: 'That file is too large.' });
     if (status >= 500) req.log.error(err);
-    return reply.code(status).send({ error: status >= 500 ? 'Something went wrong on the server.' : err.message });
+    return reply.code(status).send({ error: status >= 500 && !err.expose ? 'Something went wrong on the server.' : err.message });
   });
 
   const portRef = () => app.server.address()?.port ?? port;
   const limiter = createLoginLimiter();
   const ops = createOps({ db, hub, dataDir, port: portRef, host, log: app.log, deps: opsDeps });
-  const ctx = { db, hub, processor, mediaDir, port: portRef, limiter, ops, live };
+  const ctx = {
+    db, hub, processor, mediaDir, port: portRef, limiter, ops, live, dataDir, backup, onRestart, restartsItself,
+    maxUpload: MAX_UPLOAD, statfs: opsDeps.statfs ?? fs.promises.statfs, bootId: randomUUID(),
+  };
   await app.register(authRoutes, ctx);
   await app.register(userRoutes, ctx);
   await app.register(roleRoutes, ctx);
@@ -111,6 +156,7 @@ export async function createServer({ dataDir, port = 8080, host = '0.0.0.0', ffm
   await app.register(settingsRoutes, ctx);
   await app.register(opsRoutes, ctx);
   await app.register(liveRoutes, ctx);
+  await app.register(backupRoutes, ctx);
 
   // TVs do not sign in: each one identifies itself and receives only its channel.
   app.register(async (scope) => {
