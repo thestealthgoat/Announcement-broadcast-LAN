@@ -30,6 +30,11 @@ What has been tested on real setups, and what hasn't. Last updated November 2, 2
 | `.pkg` install to Applications from a browser download | Not tested |
 | Uploading from a real phone | Not tested |
 | Samsung and LG built-in browsers | Not tested |
+| Live feed from a capture card or camera | Not tested |
+| Live feed with NVENC or Quick Sync hardware encoding | Not tested |
+| Live feed over SRT | Not tested: the bundled Mac ffmpeg has no SRT, so it is hidden there |
+| Live feed on Windows | Not tested |
+| Live feed from real OBS or vMix, or on a TV | Not tested |
 
 ## TV compatibility
 

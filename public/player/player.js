@@ -6,6 +6,8 @@
   var READY_TIMEOUT_MS = 8000;
   var PRELOAD_LEAD_S = 8;
   var STALL_S = 15;
+  var RETRY_MS = 10000;
+  var HLS_RETRY_MS = 3000;
   var MAX_CACHE_FILE = 500 * 1024 * 1024;
   var SCHEDULE_CHECK_TICKS = 15; // tick() runs once a second
   var CLOCK_KEY = 'signage-clock-offset';
@@ -295,6 +297,15 @@
     document.getElementsByTagName('head')[0].appendChild(s);
   }
 
+  function hlsConfig(slide) {
+    // A feed from this server has 1-second segments, so it can buffer very little
+    // and jump back to the live edge if it falls behind. Others keep gentler settings.
+    if (slide.src.indexOf('/live/') === 0) {
+      return { liveSyncDurationCount: 2, liveMaxLatencyDurationCount: 5, maxBufferLength: 4, maxMaxBufferLength: 8, backBufferLength: 4 };
+    }
+    return { liveSyncDurationCount: 2, maxBufferLength: 10, backBufferLength: 10 };
+  }
+
   // Builds a slide in a hidden layer and calls back when it is ready to show (or has failed).
   function build(slide, done) {
     var layer = document.createElement('div');
@@ -358,12 +369,19 @@
         loadHls(function () {
           if (prep.disposed) return;
           if (!window.Hls || !window.Hls.isSupported()) return finish(false);
-          var hls = new window.Hls({ liveSyncDurationCount: 2, maxBufferLength: 10, backBufferLength: 10 });
+          var hls = new window.Hls(hlsConfig(slide));
           prep.hls = hls;
+          var triedMediaRecovery = false;
           hls.on(window.Hls.Events.ERROR, function (event, data) {
             if (!data.fatal) return;
+            if (data.type === window.Hls.ErrorTypes.MEDIA_ERROR && !triedMediaRecovery) {
+              triedMediaRecovery = true;
+              hls.recoverMediaError();
+              return;
+            }
             if (!finished) finish(false);
             else if (current === prep) failCurrent();
+            else prep.failed = true; // loading off-screen: show() builds it again
           });
           hls.loadSource(slide.src);
           hls.attachMedia(video);
@@ -574,7 +592,7 @@
     prepared = null;
     pendingKey = slide.key;
     if (ready && ready.slide.key === slide.key) {
-      if (ready.isReady) return swapIn(ready);
+      if (ready.isReady && !ready.failed) return swapIn(ready);
       if (!ready.failed) {
         ready.onReady = function (ok) {
           if (token !== showToken) return dispose(ready);
@@ -612,10 +630,11 @@
     clearTimeout(endTimer);
     if (failures >= Math.max(list.length, 1)) {
       // Everything is failing: back off so this doesn't spin, and try again shortly.
+      // showIdle clears the timer, so it has to run first or the retry never happens.
       failures = 0;
       // Nothing else can show, and a slide whose schedule ended must not stay up.
       if (!current || indexOfKey(list, current.slide.key) < 0) showIdle();
-      endTimer = setTimeout(advance, 10000);
+      endTimer = setTimeout(advance, list.length && list[0].type === 'hls' ? HLS_RETRY_MS : RETRY_MS);
       return;
     }
     endTimer = setTimeout(advance, 500);
@@ -660,15 +679,16 @@
     var left = remainingSeconds();
     if (left !== null && left <= PRELOAD_LEAD_S) prepareNext();
 
-    // A file video that stops making progress gets skipped.
-    if (current && current.slide.type === 'video' && current.el && !current.el.paused) {
+    // A video or live stream that stops making progress gets skipped.
+    var playing = current && (current.slide.type === 'video' || current.slide.type === 'hls') && current.el;
+    if (playing && !current.el.paused) {
       var t = current.el.currentTime;
       if (t !== lastProgress.time) {
         lastProgress = { time: t, at: Date.now() };
       } else if (Date.now() - lastProgress.at > STALL_S * 1000) {
         failCurrent();
       }
-    } else if (current && current.slide.type === 'video' && current.el && current.el.paused && !current.el.ended) {
+    } else if (playing && current.el.paused && !current.el.ended) {
       if (Date.now() - lastProgress.at > STALL_S * 1000) failCurrent();
     }
   }

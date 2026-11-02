@@ -53,7 +53,9 @@ export function toSlides(media, placement) {
   }
 }
 
-export function createHub(db, log) {
+// isAvailable says whether a library item can be shown right now. Only a local
+// live feed that is down answers no.
+export function createHub(db, log, isAvailable = () => true) {
   const players = new Set();
   const admins = new Set();
   let expiryTimer = null;
@@ -85,7 +87,10 @@ export function createHub(db, log) {
       if (o.media_id) {
         const media = db.get("SELECT * FROM media WHERE id = ? AND status = 'ready'", o.media_id);
         if (!media) continue;
-        slides = toSlides(media, placement);
+        slides = isAvailable(media.id) ? toSlides(media, placement) : [{
+          key: `o${o.id}:waiting`, mediaId: media.id, type: 'text', name: media.name,
+          title: 'Waiting for the live feed', body: '', transition: 'cut', audio: false, duration: DEFAULT_STILL_SECONDS,
+        }];
       } else {
         slides = [{
           key: `o${o.id}`, mediaId: null, type: 'text', name: o.title || 'Announcement',
@@ -106,7 +111,7 @@ export function createHub(db, log) {
        ORDER BY p.position, p.id`,
       channel.id,
     );
-    const slides = rows.flatMap((r) =>
+    const slides = rows.filter((r) => isAvailable(r.id)).flatMap((r) =>
       toSlides(r, { key: `p${r.pid}`, duration: r.p_duration, transition: r.transition, audio: r.audio, schedule: scheduleOf(r) }),
     );
     return {

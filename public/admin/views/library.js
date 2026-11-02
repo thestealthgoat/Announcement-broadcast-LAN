@@ -1,6 +1,8 @@
 import { h, api, guard, field, checkbox, toast, openDialog, thumb, TYPE_LABEL } from '../lib.js';
 
-export async function libraryView(main) {
+const LIVE_STATUS = { live: 'Live feed: on air', idle: 'Live feed: no signal', error: 'Live feed: has a problem', off: 'Live feed: turned off' };
+
+export async function libraryView(main, ctx) {
   const grid = h('div', { class: 'grid' });
   let filter = '';
   let media = [];
@@ -15,7 +17,7 @@ export async function libraryView(main) {
       ? h('div', {}, h('div', { class: 'muted small' }, m.progress != null ? `Converting ${m.progress}%` : 'Processing…'), h('div', { class: 'bar' }, h('div', { style: `width:${m.progress ?? 5}%` })))
       : m.status === 'failed'
         ? h('div', { class: 'err small' }, m.error ?? 'Failed')
-        : h('div', { class: 'muted small' }, TYPE_LABEL[m.type]);
+        : h('div', { class: 'muted small' }, LIVE_STATUS[m.liveStatus] ?? TYPE_LABEL[m.type]);
     return h('button', { class: 'media-card', onclick: () => editDialog(m) },
       thumb(m, 'pic'),
       h('div', { class: 'meta' }, h('div', { class: 'title' }, m.name), status),
@@ -53,7 +55,7 @@ export async function libraryView(main) {
           guard(async () => {
             const patch = { name: name.value };
             if (m.type === 'text') Object.assign(patch, { title: title.value, body: body.value });
-            if (m.type === 'web' || m.type === 'hls') patch.url = url.value;
+            if ((m.type === 'web' || m.type === 'hls') && !m.live) patch.url = url.value;
             await api.patch(`/api/media/${m.id}`, patch);
             close();
             refresh();
@@ -64,10 +66,11 @@ export async function libraryView(main) {
         field('Name', name),
         m.type === 'text' && field('Title', title),
         m.type === 'text' && field('Message', body),
-        (m.type === 'web' || m.type === 'hls') && field('Address', url),
+        (m.type === 'web' || m.type === 'hls') && !m.live && field('Address', url),
+        m.live && h('p', { class: 'muted small' }, 'This is a live feed. It only shows on TVs while it is on air.'),
         m.status === 'ready' && chanBox,
         h('div', { class: 'dialog-foot' },
-          h('button', {
+          (!m.live || ctx.me.role === 'admin') && h('button', {
             type: 'button',
             class: 'danger-text left',
             onclick: () => guard(async () => {

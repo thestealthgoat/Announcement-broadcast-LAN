@@ -16,7 +16,13 @@ export function mediaJson(m) {
     src: m.file ? `/media/${m.id}/${m.file}` : m.url ?? null,
     duration: m.duration, pages: m.pages, url: m.url, title: m.title, body: m.body, size: m.size,
     createdAt: m.created_at,
+    live: isLiveFeedUrl(m.url),
   };
+}
+
+// parseWebUrl only accepts absolute addresses, so only a live feed's can look like this.
+function isLiveFeedUrl(url) {
+  return typeof url === 'string' && url.startsWith('/live/');
 }
 
 // Web pages are shown in an iframe, so only plain http(s) pages are allowed, and never YouTube.
@@ -32,7 +38,7 @@ export function parseWebUrl(value) {
   return url;
 }
 
-export default async function mediaRoutes(app, { db, hub, processor, mediaDir }) {
+export default async function mediaRoutes(app, { db, hub, processor, live, mediaDir }) {
   const insert = (fields) => {
     const id = fields.id ?? randomUUID();
     db.run(
@@ -69,7 +75,7 @@ export default async function mediaRoutes(app, { db, hub, processor, mediaDir })
   };
 
   app.get('/api/media', { preHandler: requireUser }, async () =>
-    db.all('SELECT * FROM media ORDER BY created_at DESC, rowid DESC').map(mediaJson),
+    db.all('SELECT * FROM media ORDER BY created_at DESC, rowid DESC').map((m) => ({ ...mediaJson(m), liveStatus: live.statusOf(m.id) })),
   );
 
   // Image or video upload, streamed straight to disk.
@@ -183,7 +189,11 @@ export default async function mediaRoutes(app, { db, hub, processor, mediaDir })
       if (b.title !== undefined) title = text(b.title, 'Title', { max: 200 });
       if (b.body !== undefined) body = text(b.body, 'Message', { max: 2000, required: false });
     }
-    if ((m.type === 'web' || m.type === 'hls') && b.url !== undefined) url = parseWebUrl(b.url).href;
+    if (live.isFeed(m.id)) {
+      if (b.url !== undefined && b.url !== m.url) throw httpError(400, "A live feed's address cannot be changed.");
+    } else if ((m.type === 'web' || m.type === 'hls') && b.url !== undefined) {
+      url = parseWebUrl(b.url).href;
+    }
     db.run('UPDATE media SET name = ?, title = ?, body = ?, url = ?, rev = rev + 1 WHERE id = ?', name, title, body, url, m.id);
     hub.pushMedia(m.id);
     hub.adminRefresh('media');
@@ -194,8 +204,10 @@ export default async function mediaRoutes(app, { db, hub, processor, mediaDir })
   app.delete('/api/media/:id', { preHandler: requireUser }, async (req) => {
     const m = getMedia(req.params.id);
     assertCanEdit(req, m.id);
+    if (live.isFeed(m.id) && req.user.role !== 'admin') throw httpError(403, 'Only admins can delete a live feed.');
     const channels = db.all('SELECT DISTINCT channel_id FROM playlist_items WHERE media_id = ?', m.id);
     const wasOverride = db.get('SELECT 1 AS x FROM overrides WHERE media_id = ? AND cleared_at IS NULL', m.id);
+    await live.remove(m.id);
     db.run('DELETE FROM media WHERE id = ?', m.id);
     fs.rmSync(path.join(mediaDir, m.id), { recursive: true, force: true });
     if (wasOverride) hub.pushAll();
@@ -203,6 +215,7 @@ export default async function mediaRoutes(app, { db, hub, processor, mediaDir })
     hub.adminRefresh('media');
     hub.adminRefresh('channels');
     hub.adminRefresh('overrides');
+    hub.adminRefresh('live');
     return { ok: true };
   });
 }
