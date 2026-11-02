@@ -53,6 +53,7 @@ const ROUTES = [
   ['POST /api/media/:id/finish', ['library.upload'], async ({ admin, who }) => ({ id: await newPdf(who, admin, true), body: {} })],
   ['POST /api/media/text', ['library.upload'], async () => ({ body: { title: 'Hello' } })],
   ['POST /api/media/url', ['library.upload'], async () => ({ body: { url: 'http://example.com/' } })],
+  ['POST /api/media/url/check', ['library.upload', 'library.edit', 'library.own'], async () => ({ body: { url: 'http://127.0.0.1:1/' } })],
   ['PATCH /api/media/:id', ['library.edit', 'library.own'], async ({ admin }) => ({ id: await newMedia(admin), body: { name: 'Changed' } }), { sufficient: ['library.edit'] }],
   ['DELETE /api/media/:id', ['library.edit', 'library.own', 'live.manage'], async ({ admin }) => ({ id: await newMedia(admin) }), { sufficient: ['library.edit'] }],
 

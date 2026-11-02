@@ -10,6 +10,7 @@ import { sniffImage } from '../media.js';
 import { addToChannel } from './channels.js';
 import { parseStyle, validateStyle } from '../slide-style.js';
 import { text } from './auth.js';
+import { checkWebPage } from '../web-check.js';
 
 const VIDEO_EXT = /\.(mp4|m4v|mov|webm|mkv|avi|mpe?g|wmv|ts|mts|m2ts|3gp)$/i;
 
@@ -32,7 +33,9 @@ function isLiveFeedUrl(url) {
   return typeof url === 'string' && url.startsWith('/live/');
 }
 
-// Web pages are shown in an iframe, so only plain http(s) pages are allowed, and never YouTube.
+// Web pages are shown in an iframe, so only plain http(s) pages are allowed. YouTube refuses frames
+// except on its embed links, and a TV has nobody to press play, so those start themselves, muted
+// because browsers block autoplay with sound.
 export function parseWebUrl(value) {
   let url;
   try {
@@ -41,7 +44,14 @@ export function parseWebUrl(value) {
     throw httpError(400, 'Enter a full web address, starting with http:// or https://');
   }
   if (url.protocol !== 'http:' && url.protocol !== 'https:') throw httpError(400, 'Only http:// and https:// addresses are allowed.');
-  if (/(^|\.)(youtube\.com|youtu\.be|youtube-nocookie\.com)$/i.test(url.hostname)) throw httpError(400, 'YouTube is not supported.');
+  if (/(^|\.)(youtube\.com|youtu\.be|youtube-nocookie\.com)$/i.test(url.hostname)) {
+    if (/youtu\.be$/i.test(url.hostname) || !/^\/embed\/[\w-]+\/?$/.test(url.pathname)) {
+      throw httpError(400, "Use YouTube's embed link: choose Share > Embed and copy the address after src=. It starts with https://www.youtube.com/embed/");
+    }
+    for (const param of ['autoplay', 'mute']) {
+      if (!url.searchParams.has(param)) url.searchParams.set(param, '1');
+    }
+  }
   return url;
 }
 
@@ -201,6 +211,19 @@ export default async function mediaRoutes(app, { db, hub, processor, live, media
     const name = text(req.body?.name, 'Name', { max: 120, required: false }) || url.hostname;
     const type = url.pathname.toLowerCase().endsWith('.m3u8') ? 'hls' : 'web';
     return finish(insert({ type, name, url: url.href, userId: req.user.id }), channelId);
+  });
+
+  // Lets the person adding a page see whether it will work before it reaches a TV.
+  app.post('/api/media/url/check', { preHandler: requirePermission('library.upload', 'library.edit', 'library.own') }, async (req) => {
+    const url = parseWebUrl(req.body?.url);
+    if (url.pathname.toLowerCase().endsWith('.m3u8')) {
+      return { status: 'stream', previewable: false, message: 'This address is a live stream, so it has no page to preview. It will play as a video on TVs.' };
+    }
+    // Framing this server would hand the page the signed-in admin's session.
+    if (url.host === req.headers.host) {
+      return { status: 'invalid', previewable: false, message: 'This address is this signage server, so it cannot be shown as a page.' };
+    }
+    return { ...(await checkWebPage(url.href)), previewable: true, url: url.href };
   });
 
   app.patch('/api/media/:id', { preHandler: requirePermission('library.edit', 'library.own') }, async (req) => {

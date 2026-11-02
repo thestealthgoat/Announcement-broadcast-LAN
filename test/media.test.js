@@ -67,14 +67,22 @@ test('PDF flow stores rendered pages and needs them all', async (t) => {
   assert.equal(done.data.pages, 2);
 });
 
-test('web items allow only http(s) and never YouTube; .m3u8 becomes an HLS item', async (t) => {
+test('web items allow only http(s) and YouTube embeds, which start themselves; .m3u8 becomes an HLS item', async (t) => {
   const { base } = await startServer(t);
   const admin = await setupAdmin(base);
-  for (const url of ['https://www.youtube.com/watch?v=1', 'https://youtu.be/1', 'javascript:alert(1)', 'file:///etc/passwd', 'nonsense']) {
+  for (const url of ['https://www.youtube.com/watch?v=1', 'https://youtu.be/1', 'https://www.youtube.com/embed/', 'https://www.youtube.com/embed/a/b', 'https://m.youtube.com/@school', 'javascript:alert(1)', 'file:///etc/passwd', 'nonsense']) {
     assert.equal((await admin.post('/api/media/url', { url })).status, 400, url);
   }
   assert.equal((await admin.post('/api/media/url', { url: 'https://example.com/menu' })).data.type, 'web');
   assert.equal((await admin.post('/api/media/url', { url: 'http://10.0.0.5/live/stream.m3u8' })).data.type, 'hls');
+  const embed = (await admin.post('/api/media/url', { url: 'https://www.youtube.com/embed/aqz-KE-bpKQ?start=30' })).data;
+  assert.equal(embed.type, 'web');
+  assert.equal(embed.url, 'https://www.youtube.com/embed/aqz-KE-bpKQ?start=30&autoplay=1&mute=1');
+  const chosen = (await admin.post('/api/media/url', { url: 'https://www.youtube-nocookie.com/embed/x_1?mute=0' })).data;
+  assert.equal(chosen.url, 'https://www.youtube-nocookie.com/embed/x_1?mute=0&autoplay=1', "the person's own setting stays");
+  const edited = await admin.patch(`/api/media/${embed.id}`, { url: 'https://www.youtube.com/embed/other' });
+  assert.equal(edited.data.url, 'https://www.youtube.com/embed/other?autoplay=1&mute=1');
+  assert.equal((await admin.patch(`/api/media/${embed.id}`, { url: 'https://youtu.be/other' })).status, 400);
 });
 
 test('ffmpeg output is parsed correctly wherever a chunk happens to split', () => {
