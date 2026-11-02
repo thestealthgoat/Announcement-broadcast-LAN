@@ -100,12 +100,37 @@ export const canEditChannel = (user, channelId) => hasPermission(user, 'channels
 export const canAddToChannel = (user, channelId) => hasPermission(user, 'channels.add') && canAccessChannel(user, channelId);
 export const canManageChannel = (user, channelId) => hasPermission(user, 'channels.manage') && canAccessChannel(user, channelId);
 
-// A library item is shared, so it can only be changed if every channel using it is one of theirs.
+// Is it on any override showing now? Directly, or as the background of one, or as the background of
+// a slide that one shows. Answers with the overrides.
+function activeOverridesShowing(db, list, mediaId) {
+  return db.all(
+    `SELECT id, all_channels FROM overrides
+     WHERE cleared_at IS NULL AND (ends_at IS NULL OR ends_at > ?)
+       AND (media_id IN (SELECT value FROM json_each(?))
+            OR (json_valid(style) AND json_extract(style, '$.image') = ?))`,
+    Date.now(), list, mediaId,
+  );
+}
+
+// A library item is shared, so it can only be changed if every channel showing it is one of theirs.
+// That counts a picture used as a slide's background, and anything on an override that's up now, and
+// an override on every channel takes the channels.all permission. Keep to the same idea of "using"
+// as mediaUsage in library.js.
 export function mediaInScope(db, user, mediaId) {
   if (hasPermission(user, 'channels.all')) return true;
-  return db
-    .all('SELECT DISTINCT channel_id FROM playlist_items WHERE media_id = ?', mediaId)
-    .every((r) => user.channelIds.includes(r.channel_id));
+  const slides = db.all(
+    "SELECT id FROM media WHERE style IS NOT NULL AND json_valid(style) AND json_extract(style, '$.image') = ?",
+    mediaId,
+  ).map((r) => r.id);
+  const list = JSON.stringify([mediaId, ...slides]);
+  const placed = db.all(
+    'SELECT DISTINCT channel_id FROM playlist_items WHERE media_id IN (SELECT value FROM json_each(?))',
+    list,
+  ).map((r) => r.channel_id);
+  if (!placed.every((id) => user.channelIds.includes(id))) return false;
+  return activeOverridesShowing(db, list, mediaId).every((o) => !o.all_channels && db
+    .all('SELECT channel_id FROM override_channels WHERE override_id = ?', o.id)
+    .every((r) => user.channelIds.includes(r.channel_id)));
 }
 
 export function canEditMedia(db, user, mediaId) {

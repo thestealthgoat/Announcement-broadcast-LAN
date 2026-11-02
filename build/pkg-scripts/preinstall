@@ -1,4 +1,19 @@
 #!/bin/sh
 # Stop a running copy so an upgrade can replace it. It restarts after install.
-/usr/bin/pkill -x "Network Signage" 2>/dev/null
+# Replacing the app while it still runs leaves the old copy open, and the new one never starts, so
+# this waits for it to go and then forces it. Nothing here may fail the install.
+APP_NAME="Network Signage"
+WAIT_SECONDS=20
+
+/usr/bin/pkill -x "$APP_NAME" 2>/dev/null
+waited=0
+while /usr/bin/pgrep -x "$APP_NAME" >/dev/null 2>&1; do
+  if [ "$waited" -ge "$WAIT_SECONDS" ]; then
+    /usr/bin/pkill -9 -x "$APP_NAME" 2>/dev/null
+    /bin/sleep 1
+    break
+  fi
+  /bin/sleep 1
+  waited=$((waited + 1))
+done
 exit 0

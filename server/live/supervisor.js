@@ -6,6 +6,7 @@ import { lanAddresses } from '../lan.js';
 import { ENCODERS, PLAYLIST, classifyFailure, feedArgs, isSenderDisconnect, playlistSegments, senderAddress } from './ffmpeg-args.js';
 import { listDevices, probeCapabilities } from './probe.js';
 import { createPidFiles } from './orphans.js';
+import { UnsafePathError, childPath } from '../safe-path.js';
 
 const POLL_MS = 500;
 const FRESH_MS = 4000;      // a playlist older than this means no new video is arriving
@@ -38,7 +39,7 @@ export function createLiveFeeds({ db, hub, dataDir, ffmpeg, log, platform = proc
   let capsPromise = null;
   let reaped = Promise.resolve();
 
-  const feedDir = (id) => path.join(liveDir, id);
+  const feedDir = (id) => childPath(liveDir, id);
   const loadRow = (id) => db.get('SELECT * FROM live_feeds WHERE media_id = ?', id);
 
   function capabilities() {
@@ -106,6 +107,11 @@ export function createLiveFeeds({ db, hub, dataDir, ffmpeg, log, platform = proc
     } catch (err) {
       if (stopped || entry.removed) return;
       log?.error?.({ err, feed: entry.id }, 'A live feed could not start');
+      // Trying again can't help a bad record, and it's deleted like any other feed.
+      if (err instanceof UnsafePathError) {
+        setStatus(entry, 'error', 'This feed has a damaged record. Delete it and add it again.');
+        return;
+      }
       if (!entry.child) retryLater(entry, startProblem(err));
     }
   }
@@ -315,6 +321,7 @@ export function createLiveFeeds({ db, hub, dataDir, ffmpeg, log, platform = proc
       stopped = true;
       clearInterval(poller);
       aborter.abort();
+      pidFiles.cancel(); // what it hasn't checked yet stays on file for the next start
       process.off('exit', killOnExit);
       await Promise.all([...entries.values()].map(killChild));
       await reaped;

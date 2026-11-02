@@ -6,7 +6,7 @@ import { createServer } from '../server/index.js';
 import { baseUrls } from '../server/lan.js';
 import { updateMenuItems } from '../server/ops/updates.js';
 import { runRecoveryFlow } from './recovery.js';
-import { restartApp } from './restart.js';
+import { quitApp, restartApp } from './restart.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const DEFAULT_PORT = 8080;
@@ -160,7 +160,7 @@ async function main() {
     if (stopping) return;
     stopping = true;
     event.preventDefault();
-    server.stop().catch(() => {}).finally(() => app.exit(0));
+    quitApp({ app, server });
   });
 }
 

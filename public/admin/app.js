@@ -10,6 +10,7 @@ import { usersView } from './views/users.js';
 import { rolesView } from './views/roles.js';
 import { settingsView } from './views/settings.js';
 import { liveView } from './views/live.js';
+import { createViewSlot } from './view-slot.js';
 
 const root = document.getElementById('app');
 const ICONS = {
@@ -23,6 +24,7 @@ const ICONS = {
 };
 
 const ctx = { me: null, branding: null, view: null, can: (key) => !!ctx.me?.permissions.includes(key) };
+const showView = createViewSlot(ctx);
 let socket = null;
 const usesChannels = () => ['channels.add', 'channels.edit', 'channels.manage'].some(ctx.can);
 
@@ -145,9 +147,8 @@ async function showPage() {
   renderShell();
   renderBanner();
   renderNotices();
-  ctx.view?.destroy?.();
   const main = document.getElementById('main');
-  ctx.view = (await route()(main, ctx)) ?? null;
+  await showView(() => route()(main, ctx));
 }
 
 function connectSocket() {

@@ -449,3 +449,57 @@ test('old clients: role and canOverride still map onto the built-in roles', asyn
   assert.equal((await admin.patch(`/api/users/${id}`, { canOverride: true })).status, 400, 'an Uploader cannot be half-promoted');
   assert.equal((await admin.patch(`/api/users/${id}`, { role: 'owner' })).status, 400);
 });
+
+// ---------- role edits stay within the channels the actor covers ----------
+
+test('someone limited to one channel cannot change or delete a role held by someone on another channel', async (t) => {
+  const { base, server } = await startServer(t);
+  const admin = await setupAdmin(base);
+  const one = (await admin.post('/api/channels', { name: 'One' })).data.id;
+  const two = (await admin.post('/api/channels', { name: 'Two' })).data.id;
+  const role = async (name, permissions) => {
+    const r = await admin.post('/api/roles', { name, permissions });
+    assert.equal(r.status, 200, JSON.stringify(r.data));
+    return r.data.id;
+  };
+  const addUser = async (username, roleId, channelIds) => {
+    const r = await admin.post('/api/users', { username, name: username, password: 'password-1', roleId, channelIds });
+    assert.equal(r.status, 200, JSON.stringify(r.data));
+  };
+  const managerRole = await role('Channel manager', ['users.manage', 'library.upload']);
+  const everyChannel = await role('Every channel manager', ['users.manage', 'channels.all', 'library.upload']);
+  const onOther = await role('Held on two', ['library.upload']);
+  const onBoth = await role('Held on both', ['library.upload']);
+  const onMine = await role('Held on one', ['library.upload']);
+  const nobody = await role('Held by nobody', ['library.upload']);
+  await addUser('mgr', managerRole, [one]);
+  await addUser('boss', everyChannel, []);
+  await addUser('two', onOther, [two]);
+  await addUser('both-a', onBoth, [one]);
+  await addUser('both-b', onBoth, [two]);
+  await addUser('mine', onMine, [one]);
+  const mgr = client(base);
+  assert.equal((await mgr.post('/api/login', { username: 'mgr', password: 'password-1' })).status, 200);
+  const boss = client(base);
+  assert.equal((await boss.post('/api/login', { username: 'boss', password: 'password-1' })).status, 200);
+
+  for (const id of [onOther, onBoth]) {
+    const edit = await mgr.patch(`/api/roles/${id}`, { permissions: [] });
+    assert.equal(edit.status, 403, JSON.stringify(edit.data));
+    assert.match(edit.data.error, /channels/);
+    assert.equal((await mgr.patch(`/api/roles/${id}`, { name: `Renamed ${id}` })).status, 403);
+    const gone = await mgr.del(`/api/roles/${id}`);
+    assert.equal(gone.status, 403, JSON.stringify(gone.data));
+  }
+  assert.deepEqual(JSON.parse(server.db.get('SELECT permissions FROM roles WHERE id = ?', onOther).permissions), ['library.upload'], 'unchanged');
+
+  // Within their channels, the same as before.
+  assert.equal((await mgr.patch(`/api/roles/${onMine}`, { permissions: [] })).status, 200);
+  assert.equal((await mgr.patch(`/api/roles/${nobody}`, { name: 'Nobody yet' })).status, 200);
+  assert.equal((await mgr.del(`/api/roles/${onMine}`)).status, 409, 'someone still holds it');
+  assert.equal((await mgr.del(`/api/roles/${nobody}`)).status, 200);
+  // Every channel, or full access, covers everyone.
+  assert.equal((await boss.patch(`/api/roles/${onOther}`, { name: 'Boss renamed' })).status, 200);
+  assert.equal((await admin.patch(`/api/roles/${onBoth}`, { name: 'Admin renamed' })).status, 200);
+  assert.equal((await boss.del(`/api/roles/${onOther}`)).status, 409, 'someone still holds it');
+});

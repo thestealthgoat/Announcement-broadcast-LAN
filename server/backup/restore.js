@@ -9,6 +9,9 @@ import { openDb, latestSchemaVersion } from '../db.js';
 import { readTar, TarError } from './tar.js';
 import { CHECKSUMS_NAME, CONFIG_NAME, DB_NAME, FORMAT, FORMAT_VERSION, MANIFEST_NAME, MEDIA_NAME, restorePath } from './layout.js';
 import { UPLOAD_PREFIX } from './swap.js';
+import { isSafeStyle } from '../slide-style.js';
+import { RESERVED_MEDIA_FOLDERS } from '../safe-path.js';
+import { PLAYLIST, ENCODERS } from '../live/ffmpeg-args.js';
 
 const SMALL_MAX = 64 * 1024;
 const CHECKSUMS_MAX = 64 * 1024 * 1024;
@@ -17,6 +20,7 @@ const NOT_A_BACKUP = 'This file is not a Network Signage backup, so nothing was 
 const DAMAGED = 'This backup is damaged, so nothing was changed. Make a new backup, or use another copy.';
 const INCOMPLETE = 'This backup is incomplete, so nothing was changed. The file may not have finished downloading or copying.';
 const UNSAFE = 'This backup contains an unsafe file path, so it was refused and nothing was changed.';
+const UNSAFE_DATA = 'This backup contains unsafe data, so it was refused and nothing was changed.';
 const UPDATE_FIRST = 'This backup came from a newer version of Network Signage, so nothing was changed. Update this computer to the latest version first, then restore it.';
 
 const refuse = (message) => httpError(400, message);
@@ -93,6 +97,72 @@ function memorySink(done) {
   };
 }
 
+const ITEM_ID = /^[A-Za-z0-9-]+$/;
+const BARE_FILE = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+const BRANDING_FILE = /^\/media\/branding\/[A-Za-z0-9][A-Za-z0-9._-]*$/;
+const SLUG = /^[a-z0-9-]+$/;
+const HEX = /^#[0-9a-f]{6}$/i;
+const FONT_FAMILY = /^[A-Za-z0-9 -]{0,60}$/;
+const FEED_INPUTS = ['rtmp', 'srt', 'device'];
+
+const isItemId = (id) => typeof id === 'string' && ITEM_ID.test(id) && !RESERVED_MEDIA_FOLDERS.has(id);
+const isBareFile = (value) => value === null || (typeof value === 'string' && BARE_FILE.test(value));
+
+// Only what the server's own routes can save: a plain web address, or this item's live feed.
+function isSafeItemUrl(url, id) {
+  if (url === null) return true;
+  if (typeof url !== 'string') return false;
+  if (url === `/live/${id}/${PLAYLIST}`) return true;
+  try {
+    const { protocol } = new URL(url);
+    return protocol === 'http:' || protocol === 'https:';
+  } catch {
+    return false;
+  }
+}
+
+function isSafeBranding(value) {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return false;
+  const { logo, fontFile, fontFamily, fontMode, primaryColor, accentColor, textColor } = value;
+  const isBrandingFile = (v) => v === undefined || v === null || v === '' || (typeof v === 'string' && BRANDING_FILE.test(v));
+  const isColor = (v) => v === undefined || (typeof v === 'string' && HEX.test(v));
+  return isBrandingFile(logo) && isBrandingFile(fontFile)
+    && (fontFamily === undefined || (typeof fontFamily === 'string' && FONT_FAMILY.test(fontFamily)))
+    && (fontMode === undefined || ['system', 'google', 'upload'].includes(fontMode))
+    && [primaryColor, accentColor, textColor].every(isColor);
+}
+
+function isSafeFeed(feed) {
+  if (!isItemId(feed.media_id) || !FEED_INPUTS.includes(feed.input)) return false;
+  if (feed.port !== null && !(Number.isInteger(feed.port) && feed.port > 0 && feed.port < 65536)) return false;
+  if (feed.encoder !== 'auto' && !Object.hasOwn(ENCODERS, feed.encoder)) return false;
+  return Number.isInteger(feed.max_bitrate) && feed.max_bitrate > 0;
+}
+
+// Everything in a database that becomes a file path, a web address, or part of a command line. The
+// files in the archive are checked by name, but these values are not, and a server would use them
+// at its next start with nobody signed in.
+function checkDatabaseValues(db) {
+  const allSafe = db.all('SELECT id, file, thumb, url, style FROM media').every((m) => (
+    isItemId(m.id) && isBareFile(m.file) && isBareFile(m.thumb) && isSafeItemUrl(m.url, m.id) && isSafeStyle(m.style)
+  ))
+    && db.all('SELECT * FROM live_feeds').every(isSafeFeed)
+    && db.all('SELECT style FROM overrides').every((o) => isSafeStyle(o.style))
+    && db.all('SELECT style FROM slide_templates').every((o) => isSafeStyle(o.style))
+    && db.all('SELECT slug FROM channels').every((c) => typeof c.slug === 'string' && SLUG.test(c.slug));
+  if (!allSafe) throw refuse(UNSAFE_DATA);
+  const branding = db.get("SELECT value FROM settings WHERE key = 'branding'");
+  if (branding) {
+    let value;
+    try {
+      value = JSON.parse(branding.value);
+    } catch {
+      throw refuse(UNSAFE_DATA);
+    }
+    if (!isSafeBranding(value)) throw refuse(UNSAFE_DATA);
+  }
+}
+
 function checkDatabase(file, manifest) {
   let raw;
   let version;
@@ -103,6 +173,8 @@ function checkDatabase(file, manifest) {
     version = raw.prepare('PRAGMA user_version').get().user_version;
     // An empty file opens fine as a blank database, and this is what rules that out.
     if (!raw.prepare("SELECT 1 AS x FROM sqlite_master WHERE type = 'table' AND name = 'users'").get()) throw refuse(DAMAGED);
+    // This app has none, and one could write what the checks below refused, after they've run.
+    if (raw.prepare("SELECT 1 AS x FROM sqlite_master WHERE type IN ('trigger', 'view')").get()) throw refuse(UNSAFE_DATA);
   } catch (err) {
     if (err.statusCode) throw err;
     throw refuse(DAMAGED);
@@ -117,6 +189,7 @@ function checkDatabase(file, manifest) {
     db = openDb(file);
     const rows = db.all('PRAGMA integrity_check');
     if (rows.length !== 1 || rows[0].integrity_check !== 'ok') throw refuse(DAMAGED);
+    checkDatabaseValues(db);
     db.run('DELETE FROM sessions'); // exports leave none, but a hand-made file might
     db.get('PRAGMA wal_checkpoint(TRUNCATE)');
   } catch (err) {

@@ -115,7 +115,13 @@ export function createExport({ db, dataDir, log, maxSize, now = () => new Date()
   fs.mkdirSync(tmpDir, { recursive: true });
   const snapshotFile = path.join(tmpDir, `snapshot-${randomUUID()}.db`);
   const cleanup = () => {
-    for (const f of [snapshotFile, `${snapshotFile}-journal`]) fs.rmSync(f, { force: true });
+    // Runs from the stream's close event, where a throw would end the whole server. Antivirus can
+    // hold these files on Windows, and a leftover is removed at the next start.
+    try {
+      for (const f of [snapshotFile, `${snapshotFile}-journal`]) fs.rmSync(f, { force: true, maxRetries: 3, retryDelay: 100 });
+    } catch (err) {
+      log?.warn?.({ err: err.message }, 'Could not remove a backup\'s temporary copy. Will try again at the next start.');
+    }
     try {
       fs.rmdirSync(tmpDir); // only succeeds when no other backup is running
     } catch {}

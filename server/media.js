@@ -2,6 +2,7 @@ import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { createRequire } from 'node:module';
+import { childPath, mediaFolder } from './safe-path.js';
 
 const require = createRequire(import.meta.url);
 
@@ -85,7 +86,7 @@ export function createProcessor({ db, hub, mediaDir, ffmpeg = resolveFfmpeg(), l
   }
 
   async function processVideo(media, dir) {
-    const source = path.join(dir, media.file);
+    const source = childPath(dir, media.file);
     const output = path.join(dir, 'video.mp4');
     const progress = createProgressParser();
     let lastPct = null;
@@ -126,7 +127,7 @@ export function createProcessor({ db, hub, mediaDir, ffmpeg = resolveFfmpeg(), l
 
   async function processImage(media, dir) {
     await runFfmpeg([
-      '-i', path.join(dir, media.file),
+      '-i', childPath(dir, media.file),
       '-frames:v', '1', '-vf', "scale='min(480,iw)':-2", '-q:v', '4', path.join(dir, 'thumb.jpg'),
     ]);
     db.run("UPDATE media SET status = 'ready', thumb = 'thumb.jpg', rev = rev + 1 WHERE id = ?", media.id);
@@ -135,29 +136,50 @@ export function createProcessor({ db, hub, mediaDir, ffmpeg = resolveFfmpeg(), l
   async function drain() {
     if (running) return;
     running = true;
-    while (queue.length && !stopped) {
-      const id = queue.shift();
-      const media = db.get('SELECT * FROM media WHERE id = ?', id);
-      if (!media) continue;
-      const dir = path.join(mediaDir, id);
-      try {
-        if (media.type === 'video') await processVideo(media, dir);
-        else await processImage(media, dir);
-      } catch (err) {
-        if (stopped) break;
-        log.error({ err, id }, 'media processing failed');
-        const friendly = media.type === 'video' ? 'Could not convert this video.' : 'This does not look like a valid image.';
-        db.run("UPDATE media SET status = 'failed', progress = NULL, error = ? WHERE id = ?", friendly, id);
+    // Always cleared, because backups are refused while this says a conversion is running.
+    try {
+      while (queue.length && !stopped) {
+        const id = queue.shift();
+        const media = db.get('SELECT * FROM media WHERE id = ?', id);
+        if (!media) continue;
+        try {
+          const dir = mediaFolder(mediaDir, id);
+          if (media.type === 'video') await processVideo(media, dir);
+          else await processImage(media, dir);
+        } catch (err) {
+          if (stopped) break;
+          log.error({ err, id }, 'media processing failed');
+          const friendly = media.type === 'video' ? 'Could not convert this video.' : 'This does not look like a valid image.';
+          db.run("UPDATE media SET status = 'failed', progress = NULL, error = ? WHERE id = ?", friendly, id);
+        }
+        if (db.get('SELECT 1 AS x FROM media WHERE id = ?', id)) hub.pushMedia(id);
+        else removeDeletedFolder(id);
+        hub.adminRefresh('media');
       }
-      if (db.get('SELECT 1 AS x FROM media WHERE id = ?', id)) hub.pushMedia(id);
-      else fs.rmSync(dir, { recursive: true, force: true }); // deleted while converting
-      hub.adminRefresh('media');
+    } finally {
+      running = false;
     }
-    running = false;
+  }
+
+  // The item was deleted while converting. If this fails, the next start's sweep takes care of it.
+  function removeDeletedFolder(id) {
+    try {
+      fs.rmSync(mediaFolder(mediaDir, id), { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
+    } catch (err) {
+      log.warn({ err, id }, 'Could not remove a deleted item\'s folder. Will try again at the next start.');
+    }
+  }
+
+  // Whether an interrupted item's file is there. A record whose path can't be used counts as no.
+  function hasFile(m) {
+    try {
+      return !!m.file && fs.existsSync(childPath(mediaFolder(mediaDir, m.id), m.file));
+    } catch {
+      return false;
+    }
   }
 
   return {
-    busy: () => running || queue.length > 0,
     enqueue(id) {
       queue.push(id);
       drain().catch((err) => log.error(err));
@@ -166,7 +188,7 @@ export function createProcessor({ db, hub, mediaDir, ffmpeg = resolveFfmpeg(), l
     // Picks up work that a shutdown interrupted.
     resume() {
       for (const m of db.all("SELECT * FROM media WHERE status = 'processing'")) {
-        if (m.file && fs.existsSync(path.join(mediaDir, m.id, m.file))) this.enqueue(m.id);
+        if (hasFile(m)) this.enqueue(m.id);
         else db.run("UPDATE media SET status = 'failed', error = 'The upload was interrupted. Please upload it again.' WHERE id = ?", m.id);
       }
     },

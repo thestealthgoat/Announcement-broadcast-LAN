@@ -1,5 +1,5 @@
 import { requirePermission, httpError } from '../auth.js';
-import { PERMISSIONS, fullAccessUsers, getRole, holdsAll, isFullAccess, isKnownPermission, legacyColumns, listRoles } from '../permissions.js';
+import { PERMISSIONS, fullAccessUsers, getRole, hasPermission, holdsAll, isFullAccess, isKnownPermission, legacyColumns, listRoles } from '../permissions.js';
 import { text } from './auth.js';
 
 const NOT_YOURS = 'You cannot give a role access you do not have yourself.';
@@ -32,6 +32,17 @@ export default async function roleRoutes(app, { db, hub }) {
     return role;
   };
 
+  // A role change reaches everyone holding it, so it's held to the same limit as editing them.
+  const assertCoversHolders = (actor, role, doing) => {
+    if (hasPermission(actor, 'channels.all')) return;
+    const outside = db.get(
+      `SELECT 1 AS x FROM users u JOIN user_channels uc ON uc.user_id = u.id
+       WHERE u.role_id = ? AND uc.channel_id NOT IN (SELECT value FROM json_each(?)) LIMIT 1`,
+      role.id, JSON.stringify(actor.channelIds),
+    );
+    if (outside) throw httpError(403, `Someone with this role works on channels you do not manage, so you cannot ${doing} it.`);
+  };
+
   app.get('/api/roles', { preHandler: requireUsers }, async (req) => ({
     permissions: PERMISSIONS,
     roles: listRoles(db).map((r) => json(r, req.user)),
@@ -52,6 +63,7 @@ export default async function roleRoutes(app, { db, hub }) {
   app.patch('/api/roles/:id', { preHandler: requireUsers }, async (req) => {
     const role = customRole(req.params.id);
     if (!holdsAll(req.user.permissions, role.permissions)) throw httpError(403, 'This role has access that you do not have, so you cannot change it.');
+    assertCoversHolders(req.user, role, 'change');
     const b = req.body ?? {};
     const name = b.name === undefined ? role.name : roleName(b.name, role.id);
     const permissions = b.permissions === undefined ? role.permissions : permissionList(b.permissions);
@@ -73,6 +85,7 @@ export default async function roleRoutes(app, { db, hub }) {
   app.delete('/api/roles/:id', { preHandler: requireUsers }, async (req) => {
     const role = customRole(req.params.id);
     if (!holdsAll(req.user.permissions, role.permissions)) throw httpError(403, 'This role has access that you do not have, so you cannot delete it.');
+    assertCoversHolders(req.user, role, 'delete');
     const n = usersOf(role.id);
     if (n) {
       throw httpError(409, `${n === 1 ? '1 person has' : `${n} people have`} this role. Move ${n === 1 ? 'them' : 'everyone'} to a different role first.`);

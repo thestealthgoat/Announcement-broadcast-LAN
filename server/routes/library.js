@@ -1,6 +1,5 @@
-import path from 'node:path';
 import { requireUser, requirePermission, httpError, canAddToChannel } from '../auth.js';
-import { deleteBlock, editBlock, folderSize, isLiveFeed, mediaUsage, removeMedia } from '../library.js';
+import { deleteBlock, editBlock, isLiveFeed, itemSize, mediaUsage, removeMedia } from '../library.js';
 import { addToChannel } from './channels.js';
 import { mediaJson } from './media.js';
 import { text } from './auth.js';
@@ -52,7 +51,7 @@ const escapeLike = (s) => s.replace(/[\\%_]/g, (c) => `\\${c}`);
 export default async function libraryRoutes(app, { db, hub, live, mediaDir }) {
   const requireOrganize = requirePermission('library.edit');
   const requireLibrary = requirePermission('library.edit', 'library.own');
-  const ctx = { db, live, mediaDir };
+  const ctx = { db, live, mediaDir, log: app.log };
   const mediaRow = (id) => db.get('SELECT * FROM media WHERE id = ?', id);
 
   // Tags for many items at once, so a page of results costs two queries rather than one per item.
@@ -141,7 +140,7 @@ export default async function libraryRoutes(app, { db, hub, live, mediaDir }) {
     let totalBytes = 0;
     for (const m of rows) {
       if (usage.get(m.id).inUse || deleteBlock(db, live, req.user, m)) continue;
-      const bytes = await folderSize(path.join(mediaDir, m.id));
+      const bytes = await itemSize(mediaDir, m.id);
       totalBytes += bytes;
       items.push({ ...mediaJson(m), bytes });
     }
@@ -242,7 +241,7 @@ export default async function libraryRoutes(app, { db, hub, live, mediaDir }) {
         results.push({ id, name: m.name, ok: false, reason: 'inUse', usage });
         continue;
       }
-      const bytes = await folderSize(path.join(mediaDir, id));
+      const bytes = await itemSize(mediaDir, id);
       if (dryRun) {
         totalBytes += bytes;
         results.push({ id, name: m.name, ok: true, usage, bytes });

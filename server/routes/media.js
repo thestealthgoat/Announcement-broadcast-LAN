@@ -5,6 +5,7 @@ import { Transform } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { requireUser, requirePermission, httpError, canAddToChannel, canEditMedia, mediaInScope } from '../auth.js';
 import { deleteBlock, findDuplicate, removeMedia } from '../library.js';
+import { mediaFolder } from '../safe-path.js';
 import { sniffImage } from '../media.js';
 import { addToChannel } from './channels.js';
 import { parseStyle, validateStyle } from '../slide-style.js';
@@ -168,14 +169,14 @@ export default async function mediaRoutes(app, { db, hub, processor, live, media
     if (!part) throw httpError(400, 'No page image was sent.');
     const buf = await part.toBuffer();
     if (sniffImage(buf) !== 'jpg') throw httpError(415, 'Page images must be JPEG.');
-    fs.writeFileSync(path.join(mediaDir, m.id, `page-${n}.jpg`), buf);
+    fs.writeFileSync(path.join(mediaFolder(mediaDir, m.id), `page-${n}.jpg`), buf);
     return { ok: true };
   });
 
   app.post('/api/media/:id/finish', { preHandler: requireUpload }, async (req) => {
     const channelId = targetChannel(req);
     const m = getPdfUpload(req);
-    const dir = path.join(mediaDir, m.id);
+    const dir = mediaFolder(mediaDir, m.id);
     let size = 0;
     for (let n = 1; n <= m.pages; n++) {
       const p = path.join(dir, `page-${n}.jpg`);
@@ -234,7 +235,7 @@ export default async function mediaRoutes(app, { db, hub, processor, live, media
     if (block === 'feed') throw httpError(403, 'You do not have permission to delete a live feed.');
     if (block === 'scope') throw httpError(403, 'This item is also used on channels you do not manage.');
     if (block) throw httpError(403, 'You can only change items you uploaded.');
-    const { channels, wasOverride } = await removeMedia({ db, live, mediaDir }, m);
+    const { channels, wasOverride } = await removeMedia({ db, live, mediaDir, log: app.log }, m);
     if (wasOverride) hub.pushAll();
     else for (const c of channels) hub.pushChannel(c);
     hub.adminRefresh('media');
