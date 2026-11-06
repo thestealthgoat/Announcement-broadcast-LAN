@@ -37,9 +37,12 @@ function isLiveFeedUrl(url) {
 // except on its embed links, and a TV has nobody to press play, so those start themselves, muted
 // because browsers block autoplay with sound.
 export function parseWebUrl(value) {
+  const raw = String(value ?? '').trim();
+  // Sites hand out embed code, and people paste all of it. Its src is the address.
+  const embed = /^<iframe\b[^>]*?\ssrc\s*=\s*["']([^"']+)["']/i.exec(raw);
   let url;
   try {
-    url = new URL(String(value ?? '').trim());
+    url = new URL(embed ? embed[1].replaceAll('&amp;', '&') : raw);
   } catch {
     throw httpError(400, 'Enter a full web address, starting with http:// or https://');
   }

@@ -34,11 +34,18 @@ export function pickLatest(releases, current) {
   return best;
 }
 
+// Where a release's downloads live. Built from a page safeReleaseUrl already accepted.
+export function updateFeedUrl(update) {
+  return `${update.url.replace('/releases/tag/', '/releases/download/')}/`;
+}
+
 // The tray menu's entry: nothing at all unless there is a release to open.
-export function updateMenuItems(update, open) {
+export function updateMenuItems(update, open, install = null) {
   if (!update) return [];
   return [
-    { label: `Update available: ${update.version}`, click: () => open(update.url) },
+    install
+      ? { label: `Install version ${update.version} now (restarts the app)`, click: () => install(update) }
+      : { label: `Update available: ${update.version}`, click: () => open(update.url) },
     { type: 'separator' },
   ];
 }

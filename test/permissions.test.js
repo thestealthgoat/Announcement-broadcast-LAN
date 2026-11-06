@@ -79,6 +79,10 @@ const ROUTES = [
   ['POST /api/branding/logo', ['settings.manage'], async () => ({ body: form('logo.png', PNG, 'image/png') })],
   ['DELETE /api/branding/logo', ['settings.manage'], async () => ({})],
   ['POST /api/branding/font', ['settings.manage'], async () => ({ body: form('font.woff2', Buffer.from('font'), 'font/woff2') })],
+  ['POST /api/updates/install', ['settings.manage'], async ({ server }) => {
+    server.db.setSetting('ops.latestRelease', { version: '99.0.0', url: 'https://github.com/thestealthgoat/Announcement-broadcast-LAN/releases/tag/v99.0.0' });
+    return { body: {} };
+  }],
   ['PUT /api/ops/settings', ['settings.manage'], async () => ({ body: { checkForUpdates: false } })],
   ['POST /api/notices/:id/dismiss', ['screens.manage', 'settings.manage'], async () => ({ id: 'not-showing', body: {} }), { expect: 404, sufficient: ['settings.manage'] }],
 
@@ -166,7 +170,7 @@ test('every mutating route is either checked below or public on purpose', async 
 });
 
 test('each permission opens its routes, and nothing else does', async (t) => {
-  const { base, server } = await startServer(t);
+  const { base, server } = await startServer(t, { updater: { start: () => ({ phase: 'downloading' }), status: () => ({ phase: 'idle' }) } });
   const admin = await setupAdmin(base);
   const testers = new Map();
 

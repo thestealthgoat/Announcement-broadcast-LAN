@@ -138,6 +138,8 @@ export function createOps({ db, hub, dataDir, port, host, log, deps = {} }) {
           id: `update-${update.version}`, kind: 'update', severity: 'info', dismissible: true,
           text: `Version ${update.version} is available. You have version ${version}. Nothing installs by itself.`,
           link: { href: update.url, label: 'See the release' },
+          version: update.version,
+          canInstall: Boolean(deps.canInstallUpdates),
         });
       }
     }
@@ -147,6 +149,7 @@ export function createOps({ db, hub, dataDir, port, host, log, deps = {} }) {
   return {
     notices,
     tick,
+    version,
     start() {
       if (timer || stopped) return queue;
       watchingSince = now();

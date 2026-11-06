@@ -220,7 +220,7 @@ export async function libraryView(main, ctx) {
       const name = h('input', { type: 'text', value: m.name, required: true, disabled: !canChange });
       const title = h('input', { type: 'text', value: m.title ?? '', disabled: !canChange, oninput: () => designer?.update() });
       const body = h('textarea', { disabled: !canChange, oninput: () => designer?.update() }, m.body ?? '');
-      const url = h('input', { type: 'url', value: m.url ?? '', disabled: !canChange });
+      const url = h('input', { type: 'text', inputmode: 'url', autocapitalize: 'none', value: m.url ?? '', disabled: !canChange });
       const preview = m.type === 'web' && createWebPreview();
       const folder = h('select', { disabled: !canChange },
         h('option', { value: '', selected: !m.folderId }, 'Top level (no folder)'),
@@ -400,7 +400,8 @@ export async function libraryView(main, ctx) {
 
   function urlDialog() {
     openDialog('Add a web page', (close) => {
-      const url = h('input', { type: 'url', required: true, placeholder: 'https://', autocapitalize: 'none' });
+      // Text, not a url field, so pasted embed code isn't refused before the server can read it.
+      const url = h('input', { type: 'text', inputmode: 'url', required: true, placeholder: 'https://… or paste embed code', autocapitalize: 'none', spellcheck: false });
       const name = h('input', { type: 'text' });
       const preview = createWebPreview();
       const submit = h('button', { type: 'submit', class: 'primary' }, 'Preview');
@@ -429,10 +430,10 @@ export async function libraryView(main, ctx) {
           });
         },
       },
-        field('Address', url),
+        field('Address or embed code', url),
         field('Name (optional)', name),
         preview.el,
-        h('p', { class: 'muted small' }, 'Preview shows what a TV will show. For YouTube, use the embed link, which plays muted. An address ending in .m3u8 is added as a live stream.'),
+        h('p', { class: 'muted small' }, 'Preview shows what a TV will show. You can paste a site\'s whole embed code. YouTube plays muted. An address ending in .m3u8 is added as a live stream.'),
         h('div', { class: 'dialog-foot' },
           h('button', { type: 'button', onclick: close }, 'Cancel'),
           submit),

@@ -1,0 +1,5 @@
+# The updater needs this file to exist. The address it downloads from is set in electron/updater.js,
+# from the release the app's own check found.
+provider: generic
+url: https://github.com/thestealthgoat/Announcement-broadcast-LAN/releases/latest/download/
+updaterCacheDirName: network-signage-updater

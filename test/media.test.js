@@ -80,6 +80,10 @@ test('web items allow only http(s) and YouTube embeds, which start themselves; .
   assert.equal(embed.url, 'https://www.youtube.com/embed/aqz-KE-bpKQ?start=30&autoplay=1&mute=1');
   const chosen = (await admin.post('/api/media/url', { url: 'https://www.youtube-nocookie.com/embed/x_1?mute=0' })).data;
   assert.equal(chosen.url, 'https://www.youtube-nocookie.com/embed/x_1?mute=0&autoplay=1', "the person's own setting stays");
+  const pasted = (await admin.post('/api/media/url', { url: '<iframe width="560" height="315" src="https://www.youtube.com/embed/-SPRJ2iGFEk?si=0GDzVEjhzFBc76Qx&amp;start=5" title="YouTube video player" frameborder="0" allowfullscreen></iframe>' })).data;
+  assert.equal(pasted.url, 'https://www.youtube.com/embed/-SPRJ2iGFEk?si=0GDzVEjhzFBc76Qx&start=5&autoplay=1&mute=1', 'whole embed code works');
+  assert.equal((await admin.post('/api/media/url', { url: '<iframe src="javascript:alert(1)"></iframe>' })).status, 400);
+  assert.equal((await admin.post('/api/media/url', { url: '<iframe data-src="https://www.youtube.com/embed/x"></iframe>' })).status, 400);
   const edited = await admin.patch(`/api/media/${embed.id}`, { url: 'https://www.youtube.com/embed/other' });
   assert.equal(edited.data.url, 'https://www.youtube.com/embed/other?autoplay=1&mute=1');
   assert.equal((await admin.patch(`/api/media/${embed.id}`, { url: 'https://youtu.be/other' })).status, 400);

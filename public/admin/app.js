@@ -11,6 +11,7 @@ import { rolesView } from './views/roles.js';
 import { settingsView } from './views/settings.js';
 import { liveView } from './views/live.js';
 import { createViewSlot } from './view-slot.js';
+import { installUpdateDialog } from './views/updateInstall.js';
 
 const root = document.getElementById('app');
 const ICONS = {
@@ -102,6 +103,7 @@ async function renderNotices() {
     const external = n.link?.href.startsWith('https://');
     return h('div', { class: `notice ${n.severity}`, role: 'status' },
       h('div', { class: 'notice-text' }, n.text),
+      n.canInstall && h('button', { class: 'primary', onclick: () => installUpdateDialog(n) }, 'Install now'),
       n.link && h('a', { class: 'notice-link', href: n.link.href, target: external ? '_blank' : undefined, rel: external ? 'noopener noreferrer' : undefined }, n.link.label),
       n.dismissible && h('button', {
         class: 'ghost',
