@@ -5,6 +5,8 @@ user=$(/usr/bin/stat -f%Su /dev/console)
 case "$user" in
   ""|root|loginwindow) exit 0 ;;
 esac
+# The in-app updater swaps the app as the signed-in user, so that user has to own it.
+/usr/sbin/chown -R "$user" "$2/Network Signage.app"
 uid=$(/usr/bin/id -u "$user") || exit 0
 /bin/launchctl asuser "$uid" /usr/bin/sudo -u "$user" /usr/bin/open "$2/Network Signage.app"
 exit 0

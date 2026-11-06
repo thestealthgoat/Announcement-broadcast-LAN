@@ -1,7 +1,7 @@
 {
   "name": "network-signage",
   "productName": "Network Signage",
-  "version": "2.0.1",
+  "version": "2.0.2",
   "description": "Open-source, self-hosted digital signage for your local network.",
   "license": "MIT",
   "type": "module",
@@ -13,8 +13,8 @@
     "test": "node --test \"test/*.test.js\"",
     "tray": "electron .",
     "icons": "node scripts/make-icons.mjs",
-    "dist:mac": "node scripts/prep-ffmpeg.mjs darwin arm64 && node scripts/prep-ffmpeg.mjs darwin x64 && electron-builder --mac pkg --arm64 && electron-builder --mac pkg --x64 && node scripts/notarize-pkg.mjs dist/Network-Signage-${npm_package_version}-mac-arm64.pkg dist/Network-Signage-${npm_package_version}-mac-x64.pkg",
-    "dist:win": "node scripts/prep-ffmpeg.mjs win32 x64 && electron-builder --win nsis --x64"
+    "dist:mac": "node scripts/prep-ffmpeg.mjs darwin arm64 && node scripts/prep-ffmpeg.mjs darwin x64 && APPLE_KEYCHAIN_PROFILE=network-signage electron-builder --mac pkg zip --arm64 && APPLE_KEYCHAIN_PROFILE=network-signage electron-builder --mac pkg zip --x64 && node scripts/notarize-pkg.mjs dist/Network-Signage-${npm_package_version}-mac-arm64.pkg dist/Network-Signage-${npm_package_version}-mac-x64.pkg && node scripts/make-update-feed.mjs mac",
+    "dist:win": "node scripts/prep-ffmpeg.mjs win32 x64 && electron-builder --win nsis --x64 && node scripts/make-update-feed.mjs win"
   },
   "dependencies": {
     "@fastify/cookie": "^11.1.5",
@@ -22,6 +22,7 @@
     "@fastify/static": "^10.1.8",
     "@fastify/websocket": "^11.3.6",
     "bonjour-service": "^1.4.4",
+    "electron-updater": "^6.8.11",
     "fastify": "^5.12.7",
     "ffmpeg-static": "^5.3.0",
     "hls.js": "^1.7.4",
@@ -63,7 +64,8 @@
     "artifactName": "Network-Signage-${version}-${os}-${arch}.${ext}",
     "mac": {
       "target": [
-        "pkg"
+        "pkg",
+        "zip"
       ],
       "category": "public.app-category.utilities",
       "icon": "build/icon.png",
@@ -80,6 +82,10 @@
         {
           "from": "bin/darwin-${arch}",
           "to": "ffmpeg"
+        },
+        {
+          "from": "build/app-update.yml",
+          "to": "app-update.yml"
         }
       ],
       "hardenedRuntime": true,
@@ -97,6 +103,10 @@
         {
           "from": "bin/win32-${arch}",
           "to": "ffmpeg"
+        },
+        {
+          "from": "build/app-update.yml",
+          "to": "app-update.yml"
         }
       ]
     },

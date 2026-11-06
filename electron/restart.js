@@ -14,7 +14,7 @@ export async function quitApp({ app, server, timeoutMs = 10000 }) {
   app.exit(0);
 }
 
-async function stopWithin(server, ms) {
+export async function stopWithin(server, ms) {
   let timer;
   const timeout = new Promise((resolve) => {
     timer = setTimeout(resolve, ms);

@@ -6,9 +6,9 @@ import { createServer } from '../server/index.js';
 import { resolveFfmpeg } from '../server/media.js';
 
 // `ops` swaps in fake clocks and networks. Test servers never reach the real network by default.
-export async function startServer(t, { ops = {} } = {}) {
+export async function startServer(t, { ops = {}, updater = null } = {}) {
   const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'signage-test-'));
-  const server = await createServer({ dataDir, port: 0, host: '127.0.0.1', ops: { fetch: null, discovery: false, ...ops } });
+  const server = await createServer({ dataDir, port: 0, host: '127.0.0.1', updater, ops: { fetch: null, discovery: false, ...ops } });
   const { port } = await server.start();
   t.after(async () => {
     await server.stop();

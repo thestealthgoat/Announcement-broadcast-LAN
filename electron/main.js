@@ -1,4 +1,5 @@
-import { app, BrowserWindow, Menu, Tray, clipboard, dialog, nativeImage, powerSaveBlocker, shell } from 'electron';
+import updaterPackage from 'electron-updater';
+import { app, autoUpdater as nativeAutoUpdater, BrowserWindow, Menu, Tray, clipboard, dialog, nativeImage, powerSaveBlocker, shell } from 'electron';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -6,7 +7,8 @@ import { createServer } from '../server/index.js';
 import { baseUrls } from '../server/lan.js';
 import { updateMenuItems } from '../server/ops/updates.js';
 import { runRecoveryFlow } from './recovery.js';
-import { quitApp, restartApp } from './restart.js';
+import { quitApp, restartApp, stopWithin } from './restart.js';
+import { createUpdater } from './updater.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const DEFAULT_PORT = 8080;
@@ -19,6 +21,7 @@ let win = null;
 let server = null;
 let port = DEFAULT_PORT;
 let stopping = false;
+let updater = null;
 
 const dataDir = () => process.env.SIGNAGE_DATA_DIR ?? app.getPath('userData');
 const adminUrl = () => `${baseUrls(port)[0]}/admin/`;
@@ -77,7 +80,7 @@ function autostartAllowed() {
 
 function buildMenu() {
   const items = [
-    ...updateMenuItems(server.ops.availableUpdate(), (url) => shell.openExternal(url)),
+    ...updateMenuItems(server.ops.availableUpdate(), (url) => shell.openExternal(url), updater && ((update) => updater.start(update))),
     { label: 'Show address and QR code', click: showWindow },
     { label: 'Open admin', click: () => shell.openExternal(adminUrl()) },
     { label: `Copy TV address (${tvUrl()})`, click: () => clipboard.writeText(tvUrl()) },
@@ -129,11 +132,32 @@ async function main() {
   app.dock?.hide();
   fs.mkdirSync(dataDir(), { recursive: true });
 
+  // Only an installed copy has anything to replace.
+  if (app.isPackaged) {
+    updater = createUpdater({
+      autoUpdater: updaterPackage.autoUpdater,
+      nativeUpdater: process.platform === 'darwin' ? nativeAutoUpdater : null,
+      version: app.getVersion(),
+      feedUrl: process.env.SIGNAGE_UPDATE_FEED ?? null,
+      log: (message) => console.error(message),
+      stop: async () => {
+        stopping = true;
+        await stopWithin(server, 15000);
+      },
+      relaunch: () => {
+        app.relaunch();
+        app.exit(0);
+      },
+    });
+  }
+
   // The port is read after any restore goes in, since a restore brings its own config.json.
   server = await createServer({
     dataDir: dataDir(),
     port: () => (port = readPort()),
     logger: { level: 'warn' },
+    updater,
+    ops: { canInstallUpdates: Boolean(updater) },
     restartsItself: true,
     onRestart: () => {
       stopping = true;

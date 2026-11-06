@@ -88,7 +88,7 @@ function openAfterRestore(dataDir, restore, log) {
 // `port` can be a function, for when the port comes from a file in the data folder, because a
 // restore can replace that file. `onRestart` runs after a restore is accepted. It should stop the
 // server and start it again, and `restartsItself` says whether it can do that without help.
-export async function createServer({ dataDir, port: portOption = 8080, host = '0.0.0.0', ffmpeg = resolveFfmpeg(), logger = false, ops: opsDeps = {}, hashBackfillDelayMs, onRestart = null, restartsItself = false }) {
+export async function createServer({ dataDir, port: portOption = 8080, host = '0.0.0.0', ffmpeg = resolveFfmpeg(), logger = false, ops: opsDeps = {}, hashBackfillDelayMs, onRestart = null, restartsItself = false, updater = null }) {
   fs.mkdirSync(dataDir, { recursive: true });
   // First, because nothing may have the database open while its files change.
   const restore = applyPendingRestore(dataDir);
@@ -153,7 +153,7 @@ export async function createServer({ dataDir, port: portOption = 8080, host = '0
   const limiter = createLoginLimiter();
   const ops = createOps({ db, hub, dataDir, port: portRef, host, log: app.log, deps: opsDeps });
   const ctx = {
-    db, hub, processor, mediaDir, port: portRef, limiter, ops, live, dataDir, backup, onRestart, restartsItself,
+    db, hub, processor, mediaDir, port: portRef, limiter, ops, live, dataDir, backup, onRestart, restartsItself, updater,
     maxUpload: MAX_BACKUP, statfs: opsDeps.statfs ?? fs.promises.statfs, bootId: randomUUID(),
   };
   await app.register(authRoutes, ctx);
